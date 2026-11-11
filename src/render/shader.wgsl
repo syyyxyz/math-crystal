@@ -16,6 +16,14 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+// The colour target is plain Rgba8Unorm: encode linear colour to sRGB here.
+fn encode(rgb: vec3<f32>) -> vec3<f32> {
+    let c = clamp(rgb, vec3(0.0), vec3(1.0));
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3(0.0031308));
+}
+
 fn outside(p: vec3<f32>) -> bool {
     let e = 1e-3;
     return any(p < u.clip_min.xyz - vec3(e)) || any(p > u.clip_max.xyz + vec3(e));
@@ -91,7 +99,7 @@ fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
         let line = 1.0 - clamp(min(d.x, d.y) - 0.3, 0.0, 1.0);
         rgb = mix(rgb, u.wire.rgb, line * i.grid.z);
     }
-    return vec4(rgb, i.color.a);
+    return vec4(encode(rgb), i.color.a);
 }
 
 struct LineIn {
@@ -146,5 +154,5 @@ fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     if i.flag > 0.5 && outside(i.world) {
         discard;
     }
-    return i.color;
+    return vec4(encode(i.color.rgb), i.color.a);
 }

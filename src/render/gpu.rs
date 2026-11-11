@@ -11,7 +11,11 @@ use wgpu::util::DeviceExt;
 
 use super::scene::{Camera, LineInstance, MeshData, MeshVertex, Scene};
 
-pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Plain (non-sRGB) target: the shaders write gamma-encoded colour
+/// themselves. egui samples textures as gamma bytes, PNG export wants gamma
+/// bytes, and this avoids needing texture view formats, which the GL
+/// backend does not support.
+pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLES: u32 = 4;
 
@@ -45,9 +49,6 @@ struct Target {
     depth: wgpu::TextureView,
     resolve: wgpu::Texture,
     resolve_view: wgpu::TextureView,
-    /// Same texels viewed as plain `Rgba8Unorm`: egui samples textures as
-    /// gamma-encoded bytes, so it must not get the sRGB-decoding view.
-    display_view: wgpu::TextureView,
 }
 
 struct GpuMesh {
@@ -229,7 +230,7 @@ impl Gpu3d {
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 usage,
-                view_formats: if format == COLOR_FORMAT { &[wgpu::TextureFormat::Rgba8Unorm] } else { &[] },
+                view_formats: &[],
             })
         };
         let msaa = tex("msaa colour", SAMPLES, COLOR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
@@ -245,17 +246,13 @@ impl Gpu3d {
             msaa: msaa.create_view(&Default::default()),
             depth: depth.create_view(&Default::default()),
             resolve_view: resolve.create_view(&Default::default()),
-            display_view: resolve.create_view(&wgpu::TextureViewDescriptor {
-                format: Some(wgpu::TextureFormat::Rgba8Unorm),
-                ..Default::default()
-            }),
             resolve,
         });
         true
     }
 
     pub fn view(&self) -> Option<&wgpu::TextureView> {
-        self.target.as_ref().map(|t| &t.display_view)
+        self.target.as_ref().map(|t| &t.resolve_view)
     }
 
     /// Render into the offscreen target. Returns true if the target texture
@@ -285,7 +282,9 @@ impl Gpu3d {
         let t = self.target.as_ref().unwrap();
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3d") });
         {
+            // The target holds gamma-encoded values; background is linear.
             let bg = view.background;
+            let g = |c: f32| srgb_encode(c) as f64;
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("3d"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -294,9 +293,9 @@ impl Gpu3d {
                     resolve_target: Some(&t.resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg[0] as f64,
-                            g: bg[1] as f64,
-                            b: bg[2] as f64,
+                            r: g(bg[0]),
+                            g: g(bg[1]),
+                            b: g(bg[2]),
                             a: bg[3] as f64,
                         }),
                         store: wgpu::StoreOp::Discard,
@@ -401,4 +400,9 @@ pub fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> std::io
     let mut writer = enc.write_header().map_err(std::io::Error::other)?;
     writer.write_image_data(rgba).map_err(std::io::Error::other)?;
     Ok(())
+}
+
+/// Linear 0..1 to sRGB-encoded 0..1.
+pub fn srgb_encode(c: f32) -> f32 {
+    if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }

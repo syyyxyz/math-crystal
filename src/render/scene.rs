@@ -137,7 +137,7 @@ impl Default for Camera {
         Self {
             yaw: (-60f32).to_radians(),
             pitch: 25f32.to_radians(),
-            dist: 5.0,
+            dist: 5.3,
             target: Vec3::ZERO,
             ortho: true,
             fov_deg: 40.0,
@@ -171,7 +171,9 @@ impl Camera {
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        self.proj(aspect) * self.view()
+        // Nudge the picture up a little: the bottom of the canvas carries
+        // the layer toolbar.
+        Mat4::from_translation(Vec3::new(0.0, 0.05, 0.0)) * self.proj(aspect) * self.view()
     }
 
     /// Orbit by a mouse drag in points.
@@ -427,6 +429,7 @@ mod tests {
         let cam = Camera::default();
         let p = Projector { vp: cam.view_proj(1.5), size: Vec2::new(300.0, 200.0) };
         let c = p.project(Vec3::ZERO).unwrap();
-        assert!((c - Vec2::new(150.0, 100.0)).length() < 1e-3);
+        // Centred horizontally, nudged up by 2.5% of the height.
+        assert!((c - Vec2::new(150.0, 95.0)).length() < 1e-3);
     }
 }

@@ -384,6 +384,13 @@ pub fn decorations(s: &Settings, frame: &Frame3, cam: &Camera, proj: &Projector)
             _ => Vec3::new(fixed_a.signum(), fixed_b.signum(), 0.0).normalize() ,
         };
         let center_px = proj.project(Vec3::ZERO).unwrap_or(Vec2::ZERO);
+        // An axis seen end-on (e.g. y in the front view) gets no labels.
+        let hmax = h[axis];
+        let edge_px = match (proj.project(at(-hmax)), proj.project(at(hmax))) {
+            (Some(a), Some(b)) => a.distance(b),
+            _ => 0.0,
+        };
+        let axis_visible = edge_px > 40.0;
         for &v in &tv {
             let t = world_of(v);
             let p = at(t);
@@ -405,7 +412,7 @@ pub fn decorations(s: &Settings, frame: &Frame3, cam: &Camera, proj: &Projector)
                     }
                 }
             }
-            if s.show_ticks {
+            if s.show_ticks && axis_visible {
                 lines.push(line(p, p + out * 0.04, pal.frame, 1.5, false));
                 let anchor = p + out * 0.07;
                 let push = proj
@@ -420,8 +427,12 @@ pub fn decorations(s: &Settings, frame: &Frame3, cam: &Camera, proj: &Projector)
                 });
             }
         }
-        // Axis name beyond the middle of the labelled edge.
-        let mid = at(0.0) + out * if s.show_ticks { 0.28 } else { 0.12 };
+        if !axis_visible {
+            continue;
+        }
+        // Axis name just past the positive end of the labelled edge, where
+        // it cannot collide with tick labels in any view.
+        let mid = at(hmax + 0.16) + out * 0.06;
         let push = proj.project(mid).map(|a| (a - center_px).normalize_or_zero()).unwrap_or(Vec2::ZERO);
         labels.push(Label {
             world: mid,

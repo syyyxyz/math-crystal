@@ -170,6 +170,9 @@ impl eframe::App for MathCrystal {
         if ui.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_help = !self.show_help;
         }
+        if self.show_help && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_help = false;
+        }
         self.top_bar(ui);
         let ctx = ui.ctx().clone();
         match self.workspace {
@@ -229,7 +232,13 @@ pub struct CalcWorkspace {
     /// (src, a, b) the model sliders were last synced to.
     model_synced_for: Option<(String, f64, f64)>,
     toast: Option<(String, Instant)>,
-    want_export: bool,
+    /// Frames left in an export: overlays are hidden while > 0.
+    export_frames: u8,
+    export_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// A screenshot was requested and has not arrived yet.
+    export_waiting: bool,
+    /// Plain clicks on the canvas place P.
+    pick_mode: bool,
 }
 
 impl CalcWorkspace {
@@ -252,7 +261,10 @@ impl CalcWorkspace {
             build_ms: 0.0,
             model_synced_for: None,
             toast: None,
-            want_export: false,
+            export_frames: 0,
+            export_result: Default::default(),
+            export_waiting: false,
+            pick_mode: false,
         };
         s.recompile();
         s.update_auto_z();
@@ -345,9 +357,14 @@ impl CalcWorkspace {
                     self.controls(ui);
                 });
             });
-        // Derived state must be current before the canvas draws.
+        // Derived state must be current before the canvas draws. The sidebar
+        // was drawn from the previous build, so repaint once more if it moved.
+        let version = self.scene_version;
         self.sync_model(false);
         self.rebuild_if_needed();
+        if self.scene_version != version {
+            ui.ctx().request_repaint();
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.window).inner_margin(egui::Margin::same(10)))
             .show(ui, |ui| self.canvas(ui, frame));
@@ -420,7 +437,16 @@ impl CalcWorkspace {
                 ui.add(egui::Slider::new(&mut s.b, yr.0..=yr.1).max_decimals(3).clamping(egui::SliderClamping::Never));
                 ui.end_row();
             });
-            caption(ui, "Tip: Shift + click the surface to place P.");
+            ui.horizontal(|ui| {
+                let label = with_icon(icon::CROSSHAIRS, "Pick on surface");
+                if ui.selectable_label(self.pick_mode, label).on_hover_text("When on, clicking the 3D surface moves P there (Shift+click always works).").clicked() {
+                    self.pick_mode = !self.pick_mode;
+                }
+                if ui.button(with_icon(icon::RESTORE, "Origin")).on_hover_text("Move P to (0, 0)").clicked() {
+                    s.a = 0.0;
+                    s.b = 0.0;
+                }
+            });
         });
 
         // ---- Derivatives ---------------------------------------------
@@ -482,15 +508,15 @@ impl CalcWorkspace {
         let mut z_auto = self.z_auto;
         let s = &mut self.settings;
         card(ui, "domain", icon::RULER, "Domain", Some(false), |_| {}, |ui| {
-            egui::Grid::new("domain").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
+            egui::Grid::new("domain").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 for (name, r) in [("x", &mut s.xr), ("y", &mut s.yr)] {
                     ui.label(RichText::new(name).monospace().color(t.muted));
-                    domain_changed |= range_edit(ui, r);
+                    ui.horizontal(|ui| domain_changed |= range_edit(ui, r));
                     ui.end_row();
                 }
                 ui.label(RichText::new("z").monospace().color(t.muted));
                 ui.add_enabled_ui(!z_auto, |ui| {
-                    range_edit(ui, &mut s.zr);
+                    ui.horizontal(|ui| range_edit(ui, &mut s.zr));
                 });
                 ui.end_row();
             });
@@ -556,7 +582,7 @@ impl CalcWorkspace {
         if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                self.camera.zoom((-scroll * 0.0025).exp());
+                self.camera.zoom((-scroll * 0.0012).exp().clamp(0.8, 1.25));
             }
         }
         if resp.double_clicked() {
@@ -567,8 +593,11 @@ impl CalcWorkspace {
             vp: self.camera.view_proj(aspect),
             size: Vec2::new(rect.width(), rect.height()),
         };
+        if self.pick_mode && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
         if resp.clicked()
-            && shift
+            && (shift || self.pick_mode)
             && let Some(pos) = resp.interact_pointer_pos()
         {
             self.pick_point(&proj, Vec2::new(pos.x - rect.min.x, pos.y - rect.min.y));
@@ -613,9 +642,6 @@ impl CalcWorkspace {
             }
             canvas.last = Some(key);
         }
-        if std::mem::take(&mut self.want_export) {
-            self.toast = Some((export_png(canvas, rs), Instant::now()));
-        }
         if let Some(id) = canvas.texture {
             egui::Image::new(egui::load::SizedTexture::new(id, rect.size()))
                 .corner_radius(12)
@@ -624,7 +650,15 @@ impl CalcWorkspace {
         ui.painter().rect_stroke(rect, 12, Stroke::new(1.0, t.card_border), egui::StrokeKind::Inside);
         let painter = ui.painter_at(rect);
         self.labels(&painter, rect, &proj, labels);
-        self.overlays(ui, rect, &t);
+        self.export_step(ui, rect);
+        if let Some(msg) = self.export_result.lock().ok().and_then(|mut r| r.take()) {
+            self.toast = Some((msg, Instant::now()));
+            self.export_waiting = false;
+        }
+        // Overlays stay hidden until the screenshot has been taken.
+        if self.export_frames == 0 && !self.export_waiting {
+            self.overlays(ui, rect, &t);
+        }
     }
 
     fn status_bar(&mut self, ui: &mut Ui, t: &Tokens) {
@@ -653,6 +687,29 @@ impl CalcWorkspace {
                     });
                 });
             });
+    }
+
+    /// Drive a PNG export: wait a frame with overlays hidden, then ask for a
+    /// window screenshot and crop it to the canvas (3D view plus labels).
+    fn export_step(&mut self, ui: &mut Ui, rect: Rect) {
+        if self.export_frames == 0 {
+            return;
+        }
+        self.export_frames -= 1;
+        if self.export_frames == 1 {
+            self.export_waiting = true;
+            let ppp = ui.ctx().pixels_per_point();
+            let slot = self.export_result.clone();
+            let ctx = ui.ctx().clone();
+            ui.ctx().request_screenshot(move |image| {
+                let msg = save_screenshot(&image, rect, ppp);
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(msg);
+                }
+                ctx.request_repaint();
+            });
+        }
+        ui.ctx().request_repaint();
     }
 
     fn apply_preset(&mut self, p: ViewPreset) {
@@ -723,7 +780,8 @@ impl CalcWorkspace {
             // The parent lays out right-to-left, so add items right-most first.
             ui.horizontal(|ui| {
                 if ui.button(with_icon(icon::CAMERA, "")).on_hover_text("Save the 3D view as PNG in ~/Pictures/Math-crystal").clicked() {
-                    self.want_export = true;
+                    // Hide the overlays, then capture the canvas with its labels.
+                    self.export_frames = 3;
                 }
                 if !self.camera.ortho {
                     ui.add(egui::Slider::new(&mut self.camera.fov_deg, 10.0..=80.0).suffix("°").max_decimals(0))
@@ -943,17 +1001,17 @@ fn fmt_short(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.replace('-', "−") }
 }
 
-/// Save the last rendered 3D view; returns a status message.
-fn export_png(canvas: &Canvas, rs: &eframe::egui_wgpu::RenderState) -> String {
-    let Some((w, h, px)) = canvas.gpu.read_rgba(&rs.device, &rs.queue) else {
-        return "Export failed: could not read the image".into();
-    };
+/// Crop a window screenshot to the canvas and save it; returns a status message.
+fn save_screenshot(image: &egui::ColorImage, rect: Rect, ppp: f32) -> String {
+    let crop = image.region(&rect.shrink(1.0), Some(ppp));
+    let [w, h] = crop.size;
+    let rgba: Vec<u8> = crop.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
     let dir = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join("Pictures/Math-crystal");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Export failed: {e}");
     }
     let path = dir.join(format!("surface-{}.png", timestamp()));
-    match write_png(&path, w, h, &px) {
+    match write_png(&path, w as u32, h as u32, &rgba) {
         Ok(()) => format!("Saved {}", path.display()),
         Err(e) => format!("Export failed: {e}"),
     }
