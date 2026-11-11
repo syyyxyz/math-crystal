@@ -128,8 +128,9 @@ impl Pool {
                 s.push(')');
             }
             Node::Un(Un::Neg, a) => {
+                // -a*b reads as -(a*b), which has the same value.
                 s.push('-');
-                self.write_min(s, a, P_POW, vars);
+                self.write_min(s, a, P_MUL, vars);
             }
             Node::Un(Un::Abs, a) => {
                 s.push('|');

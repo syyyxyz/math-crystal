@@ -123,6 +123,21 @@ impl Surface {
         self.prog.eval(&[x, y])
     }
 
+    /// f, f_x, f_y, f_xx, f_yy, f_xy, f_yx at one point (symbolic only).
+    pub fn eval_point_all(&self, x: f64, y: f64) -> Vec<f64> {
+        self.all(x, y)
+    }
+
+    /// All seven outputs on many points: `out[k][point]`.
+    pub fn eval_all(&self, xs: &[f64], ys: &[f64]) -> Vec<Vec<f64>> {
+        self.prog.eval_batch(&[xs, ys], xs.len())
+    }
+
+    /// f on many points.
+    pub fn eval_f_batch(&self, xs: &[f64], ys: &[f64]) -> Vec<f64> {
+        self.f_prog.eval_batch(&[xs, ys], xs.len()).swap_remove(0)
+    }
+
     /// Point derivatives with cross-checking (see [`Source`]).
     pub fn derivs(&self, a: f64, b: f64) -> PointDerivs {
         let s0 = self.all(a, b);

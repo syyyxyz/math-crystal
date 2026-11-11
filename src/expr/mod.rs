@@ -231,44 +231,94 @@ impl Pool {
             (_, Some(y)) if y == -1.0 => return self.neg(a),
             _ => {}
         }
-        // Pull signs out so that equal magnitudes hash-cons together.
-        if let Node::Un(Un::Neg, c) = self.node(a) {
-            let m = self.mul(c, b);
-            return self.neg(m);
-        }
-        if let Node::Un(Un::Neg, c) = self.node(b) {
-            let m = self.mul(a, c);
-            return self.neg(m);
-        }
-        if a == b {
-            let two = self.num(2.0);
-            return self.pow(a, two);
-        }
-        // c1 * (c2 * x) -> (c1*c2) * x
-        let (c, other) = match (self.as_const(a), self.as_const(b)) {
-            (Some(c), _) => (Some(c), b),
-            (_, Some(c)) => (Some(c), a),
-            _ => (None, a),
-        };
-        if let Some(c1) = c
-            && let Node::Bin(Bin::Mul, p, q) = self.node(other)
-            && let Some(c2) = self.as_const(p)
-        {
-            let k = self.num(c1 * c2);
-            return self.mul(k, q);
-        }
-        // x^p * x -> x^(p+1), x * x^p likewise.
-        for (base, pw) in [(a, b), (b, a)] {
-            if let Node::Bin(Bin::Pow, pb, pe) = self.node(pw)
-                && pb == base
-                && self.as_const(pe).is_some()
+        // Flatten both sides into coefficient * product of base^exponent,
+        // merge equal bases and rebuild in canonical (id) order, so that
+        // y*(y*sin(x*y)) becomes y^2*sin(x*y) and x*(y*z) == y*(x*z).
+        let mut coeff = 1.0;
+        let mut factors: Vec<(Id, f64)> = Vec::new();
+        self.collect_factors(a, &mut coeff, &mut factors);
+        self.collect_factors(b, &mut coeff, &mut factors);
+        factors.sort_by_key(|f| self.order_key(f.0));
+        let mut merged: Vec<(Id, f64)> = Vec::new();
+        for (base, e) in factors {
+            if let Some(last) = merged.last_mut()
+                && last.0 == base
+                // x^0.5 * x^0.5 -> x would drop the x >= 0 domain; merge
+                // only when at least one exponent is an integer.
+                && (last.1.fract() == 0.0 || e.fract() == 0.0)
             {
-                let one = self.num(1.0);
-                let e = self.add(pe, one);
-                return self.pow(base, e);
+                last.1 += e;
+                continue;
             }
+            merged.push((base, e));
         }
-        self.bin_raw(Bin::Mul, a, b)
+        if coeff == 0.0 {
+            return self.num(0.0);
+        }
+        // Left-associated chain led by |coeff|; the sign goes outside so
+        // that sums can turn `a + -(b)` into `a - b`.
+        let mut prod: Option<Id> = (coeff.abs() != 1.0).then(|| self.num(coeff.abs()));
+        for (base, e) in merged {
+            if e == 0.0 {
+                continue;
+            }
+            let f = if e == 1.0 {
+                base
+            } else {
+                let k = self.num(e);
+                self.bin_raw(Bin::Pow, base, k)
+            };
+            // Keep the canonical order (bin_raw would re-sort by id).
+            prod = Some(match prod {
+                None => f,
+                Some(p) => self.intern(Node::Bin(Bin::Mul, p, f)),
+            });
+        }
+        let Some(prod) = prod else {
+            return self.num(coeff);
+        };
+        if coeff < 0.0 {
+            if let Some(c) = self.as_const(prod) {
+                return self.num(-c);
+            }
+            self.intern(Node::Un(Un::Neg, prod))
+        } else {
+            prod
+        }
+    }
+
+    /// Structural ordering for product factors, independent of creation
+    /// order: variables (x before y), then powers of variables, then
+    /// functions, then everything else; ties by id.
+    fn order_key(&self, id: Id) -> (u8, u8, Id) {
+        match self.node(id) {
+            Node::Var(v) => (1, v, id),
+            Node::I => (1, 255, id),
+            Node::Bin(Bin::Pow, b, _) => match self.node(b) {
+                Node::Var(v) => (2, v, id),
+                _ => (4, 0, id),
+            },
+            Node::Un(..) => (3, 0, id),
+            _ => (4, 0, id),
+        }
+    }
+
+    /// Factors of a product: constants go into `coeff`, everything else is
+    /// (base, constant exponent).
+    fn collect_factors(&self, id: Id, coeff: &mut f64, out: &mut Vec<(Id, f64)>) {
+        match self.node(id) {
+            Node::Const(b) => *coeff *= f64::from_bits(b),
+            Node::Un(Un::Neg, a) => {
+                *coeff = -*coeff;
+                self.collect_factors(a, coeff, out);
+            }
+            Node::Bin(Bin::Mul, a, b) => {
+                self.collect_factors(a, coeff, out);
+                self.collect_factors(b, coeff, out);
+            }
+            Node::Bin(Bin::Pow, base, e) if self.as_const(e).is_some() => out.push((base, self.as_const(e).unwrap())),
+            _ => out.push((id, 1.0)),
+        }
     }
 
     pub fn div(&mut self, a: Id, b: Id) -> Id {

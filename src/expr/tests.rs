@@ -80,6 +80,31 @@ fn simplification_and_sharing() {
     assert_eq!(p.to_string(dd, &v.0), "6*x");
 }
 
+#[test]
+fn products_are_flattened() {
+    let v = xy();
+    let show = |src: &str| {
+        let mut p = Pool::new();
+        let id = parse(src, &mut p, &v, false).unwrap();
+        p.to_string(id, &v.0)
+    };
+    assert_eq!(show("y*(y*sin(x*y))"), show("y^2*sin(x*y)"));
+    assert_eq!(show("x*(y*x)"), "x^2*y");
+    assert_eq!(show("2*(3*x)*(-y)"), "-6*x*y");
+    assert_eq!(show("x^0.5*x^0.5"), "x^0.5*x^0.5");
+    assert_eq!(show("x^0.5*x"), "x^1.5");
+    // Mixed partials of a smooth function now share one canonical form.
+    let mut p = Pool::new();
+    let f = parse("0.15*x^2 - 0.08*y^2 + 0.12*sin(x*y)", &mut p, &v, false).unwrap();
+    let fx = p.diff(f, 0);
+    let fy = p.diff(f, 1);
+    let fxy = p.diff(fx, 1);
+    let fyx = p.diff(fy, 0);
+    assert_eq!(fxy, fyx, "{} vs {}", p.to_string(fxy, &v.0), p.to_string(fyx, &v.0));
+    let fxx = p.diff(fx, 0);
+    assert_eq!(p.to_string(fxx, &v.0), "0.3 - 0.12*y^2*sin(x*y)");
+}
+
 /// Compare symbolic derivatives against central differences on many points.
 #[test]
 fn derivatives_match_finite_differences() {
