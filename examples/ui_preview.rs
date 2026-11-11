@@ -13,9 +13,7 @@ fn main() {
         .with_accessibility_check(false)
         .wgpu()
         .build_eframe(|cc| MathCrystal::new(cc));
-    if dark {
-        h.state_mut().set_dark();
-    }
+    h.ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
     let classic = std::env::args().any(|a| a == "--classic");
     if classic {
         let c = h.state_mut().calc_mut();

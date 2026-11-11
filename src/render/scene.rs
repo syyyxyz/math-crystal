@@ -137,7 +137,7 @@ impl Default for Camera {
         Self {
             yaw: (-60f32).to_radians(),
             pitch: 25f32.to_radians(),
-            dist: 4.6,
+            dist: 5.0,
             target: Vec3::ZERO,
             ortho: true,
             fov_deg: 40.0,

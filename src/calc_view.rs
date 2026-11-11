@@ -95,18 +95,18 @@ impl Theme {
     pub fn palette(self) -> Palette {
         match self {
             Theme::Light => Palette {
-                background: hex(0xfbfbfc, 1.0),
+                background: hex(0xfcfcfe, 1.0),
                 wire: [0.0, 0.0, 0.0],
-                frame: hex(0x5b6170, 1.0),
-                grid: hex(0xc9ccd4, 1.0),
+                frame: hex(0x7a8194, 1.0),
+                grid: hex(0xdfe2ea, 1.0),
                 text: [0x1d, 0x20, 0x26],
                 muted_text: [0x5b, 0x61, 0x70],
             },
             Theme::Dark => Palette {
-                background: hex(0x17181c, 1.0),
+                background: hex(0x161820, 1.0),
                 wire: [0.0, 0.0, 0.0],
                 frame: hex(0x9aa0ad, 1.0),
-                grid: hex(0x3a3d46, 1.0),
+                grid: hex(0x2c303c, 1.0),
                 text: [0xe6, 0xe8, 0xee],
                 muted_text: [0x9a, 0xa0, 0xad],
             },

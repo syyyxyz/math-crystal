@@ -17,7 +17,9 @@ fn main() {
     eprintln!("adapter: {:?}", adapter.get_info());
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).expect("device");
     let surf = Surface::new(&src).expect("parse");
-    let mut s = if std::env::var("ICON").is_ok() {
+    let mut s = if std::env::var("DEFAULTS").is_ok() {
+        calc_view::Settings::default()
+    } else if std::env::var("ICON").is_ok() {
         calc_view::Settings { show_model: false, show_point: false, resolution: 97, ..Default::default() }
     } else {
         calc_view::Settings { a: 0.6, b: -0.4, show_plane: true, show_tangent_x: true, show_tangent_y: true, show_grid: true, show_sections: false, show_gradient: true, ..Default::default() }

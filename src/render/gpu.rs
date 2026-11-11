@@ -45,6 +45,9 @@ struct Target {
     depth: wgpu::TextureView,
     resolve: wgpu::Texture,
     resolve_view: wgpu::TextureView,
+    /// Same texels viewed as plain `Rgba8Unorm`: egui samples textures as
+    /// gamma-encoded bytes, so it must not get the sRGB-decoding view.
+    display_view: wgpu::TextureView,
 }
 
 struct GpuMesh {
@@ -226,7 +229,7 @@ impl Gpu3d {
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 usage,
-                view_formats: &[],
+                view_formats: if format == COLOR_FORMAT { &[wgpu::TextureFormat::Rgba8Unorm] } else { &[] },
             })
         };
         let msaa = tex("msaa colour", SAMPLES, COLOR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
@@ -242,13 +245,17 @@ impl Gpu3d {
             msaa: msaa.create_view(&Default::default()),
             depth: depth.create_view(&Default::default()),
             resolve_view: resolve.create_view(&Default::default()),
+            display_view: resolve.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::Rgba8Unorm),
+                ..Default::default()
+            }),
             resolve,
         });
         true
     }
 
     pub fn view(&self) -> Option<&wgpu::TextureView> {
-        self.target.as_ref().map(|t| &t.resolve_view)
+        self.target.as_ref().map(|t| &t.display_view)
     }
 
     /// Render into the offscreen target. Returns true if the target texture

@@ -29,10 +29,6 @@ fn main() -> eframe::Result {
 }
 
 fn icon() -> egui::IconData {
-    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon.png")));
-    let mut reader = decoder.read_info().expect("icon header");
-    let mut buf = vec![0; reader.output_buffer_size().expect("icon size")];
-    let info = reader.next_frame(&mut buf).expect("icon data");
-    buf.truncate(info.buffer_size());
-    egui::IconData { rgba: buf, width: info.width, height: info.height }
+    let (width, height, rgba) = math_crystal::ui::icon_rgba();
+    egui::IconData { rgba, width, height }
 }
