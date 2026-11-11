@@ -3,3 +3,4 @@ pub mod expr;
 pub mod calc;
 pub mod render;
 pub mod calc_view;
+pub mod app;

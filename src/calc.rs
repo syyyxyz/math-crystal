@@ -319,6 +319,9 @@ pub fn classify(d: &PointDerivs) -> Option<&'static str> {
     if g > 1e-6 * (1.0 + d.f.abs()) {
         return None;
     }
+    if d.mixed_equal() == Some(false) {
+        return Some("critical, but the second-derivative test does not apply (f is not C2 here)");
+    }
     let fxy = 0.5 * (d.fxy.v + d.fyx.v);
     let det = d.fxx.v * d.fyy.v - fxy * fxy;
     let eps = 1e-9 * (1.0 + d.fxx.v.abs() + d.fyy.v.abs()).powi(2);
@@ -388,6 +391,8 @@ mod tests {
         assert_eq!(cl("x^2 - y^2"), Some("saddle point"));
         assert_eq!(cl("x^4 + y^4"), Some("degenerate (test inconclusive)"));
         assert_eq!(cl("x + y"), None);
+        let c = cl("if(x^2 + y^2 == 0, 0, x*y*(x^2 - y^2)/(x^2 + y^2))").unwrap();
+        assert!(c.contains("does not apply"), "{c}");
     }
 
     #[test]
