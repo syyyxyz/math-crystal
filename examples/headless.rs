@@ -17,7 +17,11 @@ fn main() {
     eprintln!("adapter: {:?}", adapter.get_info());
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).expect("device");
     let surf = Surface::new(&src).expect("parse");
-    let mut s = calc_view::Settings { a: 0.6, b: -0.4, show_plane: true, show_tangent_x: true, show_tangent_y: true, show_grid: true, show_sections: false, show_gradient: true, ..Default::default() };
+    let mut s = if std::env::var("ICON").is_ok() {
+        calc_view::Settings { show_model: false, show_point: false, resolution: 97, ..Default::default() }
+    } else {
+        calc_view::Settings { a: 0.6, b: -0.4, show_plane: true, show_tangent_x: true, show_tangent_y: true, show_grid: true, show_sections: false, show_gradient: true, ..Default::default() }
+    };
     let d = surf.derivs(s.a, s.b);
     s.model_fxx = d.fxx.v; s.model_fyy = d.fyy.v; s.model_fxy = d.fxy.v;
     let z = surf.sample(s.xr, s.yr, 65);
@@ -25,15 +29,17 @@ fn main() {
     let built = calc_view::build(Some(&surf), &s);
     let mut cam = Camera::default();
     if let (Some(y), Some(p)) = (args.get(3), args.get(4)) { cam.yaw = y.parse::<f32>().unwrap().to_radians(); cam.pitch = p.parse::<f32>().unwrap().to_radians(); }
-    let size = [1200u32, 800u32];
-    let proj = Projector { vp: cam.view_proj(1.5), size: Vec2::new(1200.0, 800.0) };
+    let icon = std::env::var("ICON").is_ok();
+    let size = if icon { [256u32, 256u32] } else { [1200u32, 800u32] };
+    let proj = Projector { vp: cam.view_proj(size[0] as f32 / size[1] as f32), size: Vec2::new(size[0] as f32, size[1] as f32) };
     let (deco, labels) = calc_view::decorations(&s, &built.frame, &cam, &proj);
     let mut scene = built.scene;
-    scene.lines.extend(deco);
+    if !icon { scene.lines.extend(deco); }
+    if icon { cam.dist = 3.9; cam.target = glam::Vec3::new(0.0, 0.0, -0.1); }
     let mut gpu = Gpu3d::new(&device);
     gpu.set_scene(&device, &scene);
     let pal = s.theme.palette();
-    gpu.render(&device, &queue, size, &View { camera: cam, clip_half: built.frame.half, background: pal.background, wire: pal.wire });
+    gpu.render(&device, &queue, size, &View { camera: cam, clip_half: built.frame.half, background: if icon { [0.0; 4] } else { pal.background }, wire: pal.wire });
     let (w, h, px) = gpu.read_rgba(&device, &queue).expect("readback");
     write_png(std::path::Path::new(&out), w, h, &px).unwrap();
     eprintln!("wrote {out} ({} meshes, {} lines, {} labels)", scene.meshes.len(), scene.lines.len(), labels.len());
