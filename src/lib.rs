@@ -6,3 +6,4 @@ pub mod calc_view;
 pub mod app;
 pub mod ui;
 pub mod analysis;
+pub mod map_view;

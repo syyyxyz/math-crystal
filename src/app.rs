@@ -5,12 +5,17 @@ use std::time::Instant;
 use egui::{Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, UiBuilder, Vec2 as EVec2};
 use glam::{Vec2, Vec3};
 
+use crate::analysis::{self, Critical, Integral, Region};
 use crate::calc::{PointDerivs, Source, Surface, classify};
+use crate::map_view::{self, MapCache, MapInput};
 use crate::calc_view::{self, Coloring, LabelKind, Settings, Theme};
 use crate::render::gpu::{Gpu3d, View, write_png};
 use crate::render::scene::{Camera, Frame3, Projector, Scene};
 use crate::ui::theme::{self, Tokens, icon, tokens, with_icon};
 use crate::ui::widgets::{badge, caption, card, chip, overlay_frame, segmented};
+
+/// Resolution of the region indicator grid used for outlines.
+const REGION_N: usize = 161;
 
 pub const DEFAULT_FUNCTION: &str = "0.15*x^2 - 0.08*y^2 + 0.12*sin(x*y)";
 
@@ -42,6 +47,12 @@ enum ViewPreset {
     Side,
     Top,
     Custom,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CanvasMode {
+    Surface,
+    Map,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -222,7 +233,7 @@ pub struct CalcWorkspace {
     preset: ViewPreset,
     canvas: Option<Canvas>,
     // Cached build results.
-    built_for: Option<(String, Settings)>,
+    built_for: Option<(String, Settings, u64)>,
     scene: Scene,
     frame: Frame3,
     derivs: Option<PointDerivs>,
@@ -237,6 +248,21 @@ pub struct CalcWorkspace {
     export_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// A screenshot was requested and has not arrived yet.
     export_waiting: bool,
+    mode: CanvasMode,
+    map_visited: bool,
+    map_cache: MapCache,
+    // Analysis caches, recomputed only when their inputs change.
+    criticals: Vec<Critical>,
+    crit_key: Option<(String, (f64, f64), (f64, f64))>,
+    region_src: String,
+    use_region: bool,
+    region: Option<Region>,
+    region_error: Option<String>,
+    region_grid: Vec<f64>,
+    integral: Option<Integral>,
+    int_key: Option<(String, (f64, f64), (f64, f64), String, bool)>,
+    int_ms: f64,
+    analysis_version: u64,
     /// Plain clicks on the canvas place P.
     pick_mode: bool,
 }
@@ -264,6 +290,20 @@ impl CalcWorkspace {
             export_frames: 0,
             export_result: Default::default(),
             export_waiting: false,
+            mode: CanvasMode::Surface,
+            map_visited: false,
+            map_cache: MapCache::default(),
+            criticals: vec![],
+            crit_key: None,
+            region_src: "x^2 + y^2 <= 1".into(),
+            use_region: false,
+            region: None,
+            region_error: None,
+            region_grid: vec![],
+            integral: None,
+            int_key: None,
+            int_ms: 0.0,
+            analysis_version: 0,
             pick_mode: false,
         };
         s.recompile();
@@ -323,20 +363,66 @@ impl CalcWorkspace {
         self.model_synced_for = Some(key);
     }
 
+    /// Recompute critical points and the double integral when their inputs
+    /// changed (not on every move of P).
+    fn update_analysis(&mut self) {
+        let Some(surf) = &self.surface else { return };
+        let s = &self.settings;
+        let ck = (surf.source.clone(), s.xr, s.yr);
+        if self.crit_key.as_ref() != Some(&ck) {
+            self.criticals = analysis::critical_points(surf, s.xr, s.yr, 24);
+            self.crit_key = Some(ck);
+            self.analysis_version += 1;
+        }
+        let ik = (surf.source.clone(), s.xr, s.yr, self.region_src.clone(), self.use_region);
+        if self.int_key.as_ref() != Some(&ik) {
+            let t0 = Instant::now();
+            self.region = None;
+            self.region_error = None;
+            self.region_grid.clear();
+            if self.use_region {
+                match Region::new(self.region_src.trim()) {
+                    Ok(r) => {
+                        self.region_grid = r.boundary_field(s.xr, s.yr, REGION_N);
+                        self.region = Some(r);
+                    }
+                    Err(e) => self.region_error = Some(e.to_string()),
+                }
+            }
+            self.integral = if self.use_region && self.region.is_none() {
+                None
+            } else {
+                Some(analysis::integrate(surf, s.xr, s.yr, self.region.as_ref()))
+            };
+            self.int_ms = t0.elapsed().as_secs_f64() * 1e3;
+            self.int_key = Some(ik);
+            self.analysis_version += 1;
+        }
+    }
+
     fn rebuild_if_needed(&mut self) {
+        self.update_analysis();
         let src = self.surface.as_ref().map(|s| s.source.clone()).unwrap_or_default();
-        if self.built_for.as_ref().is_some_and(|(s, st)| *s == src && *st == self.settings) {
+        if self
+            .built_for
+            .as_ref()
+            .is_some_and(|(s, st, v)| *s == src && *st == self.settings && *v == self.analysis_version)
+        {
             return;
         }
         let t0 = Instant::now();
-        let b = calc_view::build(self.surface.as_ref(), &self.settings);
+        let mut b = calc_view::build(self.surface.as_ref(), &self.settings);
+        if let Some(surf) = &self.surface {
+            let region = (!self.region_grid.is_empty()).then_some((&self.region_grid[..], REGION_N));
+            calc_view::analysis_layers(surf, &self.settings, &b.frame, &self.criticals, region, &mut b.scene);
+        }
         self.build_ms = t0.elapsed().as_secs_f64() * 1e3;
         self.scene = b.scene;
         self.frame = b.frame;
         self.derivs = b.derivs;
         self.z_samples = b.z_samples;
         self.scene_version += 1;
-        self.built_for = Some((src, self.settings.clone()));
+        self.built_for = Some((src, self.settings.clone(), self.analysis_version));
     }
 
     pub fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
@@ -453,6 +539,162 @@ impl CalcWorkspace {
         let derivs = self.derivs;
         card(ui, "derivs", icon::SIGMA, "Derivatives at P", Some(true), |_| {}, |ui| readout(ui, &t, derivs.as_ref()));
 
+        // ---- Directional derivative ------------------------------------
+        let derivs = self.derivs;
+        let s = &mut self.settings;
+        card(
+            ui,
+            "direction",
+            icon::COMPASS,
+            "Directional derivative",
+            Some(true),
+            |ui| {
+                ui.checkbox(&mut s.show_direction, "Show");
+            },
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("angle θ").color(t.muted));
+                    // Edit a copy: the slider rounds what it shows, and exact
+                    // angles from the buttons must survive.
+                    let mut shown = s.dir_angle;
+                    if ui.add(egui::Slider::new(&mut shown, -180.0..=180.0).suffix("°").max_decimals(1)).changed() {
+                        s.dir_angle = shown;
+                    }
+                });
+                let Some(d) = derivs.filter(|d| d.first_ok()) else {
+                    caption(ui, "Needs f and its gradient at P.");
+                    return;
+                };
+                let a = s.dir_angle.to_radians();
+                let (c, sn) = (a.cos(), a.sin());
+                let du = d.fx.v * c + d.fy.v * sn;
+                let g = d.fx.v.hypot(d.fy.v);
+                kv(ui, &t, "u", "unit vector", &format!("({}, {})", fmt_short(c), fmt_short(sn)));
+                kv(ui, &t, "D_u f", "= ∇f · u", &fmt_val(du));
+                kv(ui, &t, "max rate", "= |∇f|", &fmt_val(g));
+                ui.horizontal_wrapped(|ui| {
+                    let grad_angle = d.fy.v.atan2(d.fx.v).to_degrees();
+                    if ui.add_enabled(g > 0.0, egui::Button::new("Along ∇f")).on_hover_text("Steepest ascent: D_u f = |∇f|").clicked() {
+                        s.dir_angle = grad_angle;
+                    }
+                    if ui.add_enabled(g > 0.0, egui::Button::new("Along level curve")).on_hover_text("Perpendicular to ∇f: D_u f = 0").clicked() {
+                        s.dir_angle = wrap_deg(grad_angle + 90.0);
+                    }
+                    if ui.button("x").on_hover_text("u = (1, 0): D_u f = f_x").clicked() {
+                        s.dir_angle = 0.0;
+                    }
+                    if ui.button("y").on_hover_text("u = (0, 1): D_u f = f_y").clicked() {
+                        s.dir_angle = 90.0;
+                    }
+                });
+            },
+        );
+
+        // ---- Critical points -------------------------------------------
+        let crit = self.criticals.clone();
+        let mut goto: Option<(f64, f64)> = None;
+        let s = &mut self.settings;
+        card(
+            ui,
+            "criticals",
+            icon::TARGET,
+            "Critical points",
+            Some(true),
+            |ui| {
+                ui.checkbox(&mut s.show_criticals, "Show");
+            },
+            |ui| {
+                if crit.is_empty() {
+                    caption(ui, "No critical points (∇f = 0) found in the domain.");
+                    return;
+                }
+                caption(ui, &format!("{} found in the domain by Newton's method on ∇f = 0. Click one to move P there.", crit.len()));
+                for c in crit.iter().take(12) {
+                    // Whole row is one click target (labels would swallow clicks).
+                    let (r, resp) = ui.allocate_exact_size(EVec2::new(ui.available_width(), 24.0), Sense::click());
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Move P here");
+                    let p = ui.painter();
+                    if resp.hovered() {
+                        p.rect_filled(r, 6, t.accent_soft);
+                    }
+                    p.circle_filled(egui::pos2(r.min.x + 8.0, r.center().y), 5.0, hex32(calc_view::critical_color(c.kind)));
+                    p.text(egui::pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, c.kind.name(), FontId::proportional(14.0), t.text);
+                    p.text(
+                        egui::pos2(r.max.x - 4.0, r.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("({}, {})   f = {}", fmt_short(c.x), fmt_short(c.y), fmt_val(c.f)),
+                        FontId::monospace(12.5),
+                        t.muted,
+                    );
+                    if resp.clicked() {
+                        goto = Some((c.x, c.y));
+                    }
+                }
+                if crit.len() > 12 {
+                    caption(ui, &format!("… and {} more", crit.len() - 12));
+                }
+            },
+        );
+        if let Some((x, y)) = goto {
+            self.settings.a = x;
+            self.settings.b = y;
+        }
+
+        // ---- Double integral -------------------------------------------
+        let s = &mut self.settings;
+        let mut use_region = self.use_region;
+        let region_src = &mut self.region_src;
+        let region_error = self.region_error.clone();
+        let integral = self.integral;
+        let int_ms = self.int_ms;
+        card(
+            ui,
+            "integral",
+            icon::INTEGRAL,
+            "Double integral",
+            Some(true),
+            |ui| {
+                ui.checkbox(&mut s.show_region, "Show region");
+            },
+            |ui| {
+                segmented(ui, &mut use_region, &[(false, "Whole domain", "Integrate over the x and y ranges"), (true, "Region", "Integrate where a condition holds")]);
+                if use_region {
+                    ui.add(
+                        egui::TextEdit::singleline(region_src)
+                            .font(FontId::monospace(14.0))
+                            .desired_width(f32::INFINITY)
+                            .hint_text("e.g. x^2 + y^2 <= 1"),
+                    );
+                    if let Some(e) = &region_error {
+                        ui.label(RichText::new(with_icon(icon::ALERT, e)).size(12.5).color(t.error));
+                    }
+                }
+                if let Some(r) = integral {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("∬ f dA").size(16.0).color(t.text));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(fmt_val(r.value)).monospace().size(16.0).strong().color(t.accent_text));
+                        });
+                    });
+                    kv(ui, &t, "error", "estimate", &format!("± {}", fmt_sci(r.error)));
+                    kv(ui, &t, "area", "of the region", &fmt_val(r.area));
+                    if r.area > 0.0 {
+                        kv(ui, &t, "mean of f", "= ∬f / area", &fmt_val(r.value / r.area));
+                    }
+                    if r.undefined_fraction > 0.0 {
+                        ui.label(
+                            RichText::new(with_icon(icon::ALERT, &format!("f is undefined on {:.1}% of the region; those parts were skipped.", r.undefined_fraction * 100.0)))
+                                .size(12.5)
+                                .color(t.warn),
+                        );
+                    }
+                    caption(ui, &format!("Composite Gauss–Legendre, {int_ms:.0} ms."));
+                }
+            },
+        );
+        self.use_region = use_region;
+
         // ---- Taylor model ---------------------------------------------
         let mut reset = false;
         let s = &mut self.settings;
@@ -496,7 +738,14 @@ impl CalcWorkspace {
                 ui.label(RichText::new("Colour").color(t.muted));
                 segmented(ui, &mut s.surface_coloring, &[(Coloring::Height, "Height", "Colour by height"), (Coloring::Solid, "Solid", "Translucent single colour")]);
             });
-            ui.checkbox(&mut s.wireframe, "Mesh lines");
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut s.wireframe, "Mesh lines");
+                ui.checkbox(&mut s.show_sections, "Sections through P");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut s.show_grid, "Box grid");
+                ui.checkbox(&mut s.show_ticks, "Axis values");
+            });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Resolution").color(t.muted));
                 ui.add(egui::Slider::new(&mut s.resolution, 33..=401).logarithmic(true));
@@ -560,6 +809,10 @@ impl CalcWorkspace {
     }
 
     fn canvas(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        if self.mode == CanvasMode::Map {
+            self.map_canvas(ui);
+            return;
+        }
         let t = tokens(ui.ctx());
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -668,7 +921,12 @@ impl CalcWorkspace {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let small = |s: &str, c: Color32| RichText::new(s).size(12.0).color(c);
-                    ui.label(small("Drag to rotate · Right-drag to pan · Scroll to zoom · Shift+click to move P · F1 help", t.faint));
+                    let hint = if self.mode == CanvasMode::Map {
+                        "Click or drag on the map to move P · Hover for values · F1 help"
+                    } else {
+                        "Drag to rotate · Right-drag to pan · Scroll to zoom · Shift+click to move P · F1 help"
+                    };
+                    ui.label(small(hint, t.faint));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         match &self.toast {
                             Some((msg, at)) if at.elapsed().as_secs_f32() < 5.0 => {
@@ -687,6 +945,44 @@ impl CalcWorkspace {
                     });
                 });
             });
+    }
+
+    fn map_canvas(&mut self, ui: &mut Ui) {
+        let t = tokens(ui.ctx());
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, Sense::hover());
+        let bg = if t.dark { Color32::from_rgb(0x16, 0x18, 0x20) } else { Color32::from_rgb(0xfc, 0xfc, 0xfe) };
+        ui.painter().rect_filled(rect, 12, bg);
+        let n = (self.z_samples.len() as f64).sqrt().round() as usize;
+        let region = (!self.region_grid.is_empty()).then_some((&self.region_grid[..], REGION_N));
+        let inp = MapInput {
+            surface: self.surface.as_ref(),
+            settings: &self.settings,
+            z: &self.z_samples,
+            n,
+            criticals: &self.criticals,
+            region,
+            derivs: self.derivs.as_ref(),
+            version: self.scene_version,
+        };
+        let moved = map_view::draw(ui, rect, &inp, &mut self.map_cache, &t);
+        if let Some((x, y)) = moved {
+            let (xr, yr) = (self.settings.xr, self.settings.yr);
+            self.settings.a = round_to(x, xr);
+            self.settings.b = round_to(y, yr);
+            self.sync_model(false);
+            self.rebuild_if_needed();
+            ui.ctx().request_repaint();
+        }
+        ui.painter().rect_stroke(rect, 12, Stroke::new(1.0, t.card_border), egui::StrokeKind::Inside);
+        self.export_step(ui, rect);
+        if let Some(msg) = self.export_result.lock().ok().and_then(|mut r| r.take()) {
+            self.toast = Some((msg, Instant::now()));
+            self.export_waiting = false;
+        }
+        if self.export_frames == 0 && !self.export_waiting {
+            self.overlays(ui, rect, &t);
+        }
     }
 
     /// Drive a PNG export: wait a frame with overlays hidden, then ask for a
@@ -783,17 +1079,18 @@ impl CalcWorkspace {
                     // Hide the overlays, then capture the canvas with its labels.
                     self.export_frames = 3;
                 }
-                if !self.camera.ortho {
+                let map = self.mode == CanvasMode::Map;
+                if !map && !self.camera.ortho {
                     ui.add(egui::Slider::new(&mut self.camera.fov_deg, 10.0..=80.0).suffix("°").max_decimals(0))
                         .on_hover_text("Field of view");
                 }
                 let mut proj = if self.camera.ortho { Projection::Ortho } else { Projection::Persp };
-                if segmented(ui, &mut proj, &[(Projection::Ortho, "Ortho", "Orthographic projection"), (Projection::Persp, "Persp", "Perspective projection")]) {
+                if !map && segmented(ui, &mut proj, &[(Projection::Ortho, "Ortho", "Orthographic projection"), (Projection::Persp, "Persp", "Perspective projection")]) {
                     self.camera.ortho = proj == Projection::Ortho;
                 }
                 ui.add_space(4.0);
                 let mut p = self.preset;
-                if segmented(
+                if !map && segmented(
                     ui,
                     &mut p,
                     &[
@@ -805,30 +1102,61 @@ impl CalcWorkspace {
                 ) {
                     self.apply_preset(p);
                 }
+                ui.add_space(4.0);
+                let mut m = self.mode;
+                if segmented(
+                    ui,
+                    &mut m,
+                    &[
+                        (CanvasMode::Surface, &with_icon(icon::CUBE, "Surface"), "3D surface view"),
+                        (CanvasMode::Map, &with_icon(icon::MAP, "Map"), "2D contour map: click or drag to move P"),
+                    ],
+                ) {
+                    if m == CanvasMode::Map && !self.map_visited {
+                        // Level curves are what a map is for.
+                        self.settings.show_contours = true;
+                        self.map_visited = true;
+                    }
+                    self.mode = m;
+                }
             });
         });
 
-        // Bottom: layer chips centred.
+        // Bottom: layer chips in one centred row; labels shorten when the
+        // canvas is too narrow for the full names.
+        let map = self.mode == CanvasMode::Map;
         let s = &mut self.settings;
-        let chips_w = 640.0f32.min(inner.width());
-        let bottom = Rect::from_center_size(
-            Pos2::new(inner.center().x, inner.max.y - 20.0),
-            EVec2::new(chips_w, 40.0),
-        );
+        type Chip<'a> = (&'a mut bool, &'static str, &'static str, Option<u32>, &'static str);
+        let mut chips: Vec<Chip> = Vec::new();
+        chips.push((&mut s.show_point, "Point P", "P", Some(calc_view::C_POINT), "The point P(a, b)"));
+        if !map {
+            chips.push((&mut s.show_tangent_x, "Tangent x", "Tan x", Some(calc_view::C_TAN_X), "Tangent line in the x direction"));
+            chips.push((&mut s.show_tangent_y, "Tangent y", "Tan y", Some(calc_view::C_TAN_Y), "Tangent line in the y direction"));
+            chips.push((&mut s.show_plane, "Plane", "Plane", Some(calc_view::C_PLANE), "Tangent plane at P"));
+        }
+        chips.push((&mut s.show_direction, "Direction u", "u", Some(calc_view::C_DIR), "Directional derivative along u"));
+        chips.push((&mut s.show_gradient, "∇f at P", "∇f", Some(calc_view::C_GRAD), "Steepest-ascent direction at P"));
+        chips.push((&mut s.show_contours, "Contours", "Levels", None, "Level curves f = c"));
+        chips.push((&mut s.show_field, "Gradient field", "Field", None, "∇f across the domain"));
+        chips.push((&mut s.show_criticals, "Critical points", "Critical", Some(calc_view::C_SADDLE), "Points where ∇f = 0"));
+        chips.push((&mut s.show_region, "Region", "Region", Some(calc_view::C_REGION), "Integration region (Double integral card)"));
+        let measure = |ui: &Ui, text: &str, sw: bool| {
+            ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), Color32::WHITE).size().x + 22.0 + if sw { 14.0 } else { 0.0 }
+        };
+        let width_of = |short: bool| {
+            chips.iter().map(|c| measure(ui, if short { c.2 } else { c.1 }, c.3.is_some()) + 6.0).sum::<f32>() + 10.0
+        };
+        let short = width_of(false) > inner.width() - 8.0;
+        let w = width_of(short).min(inner.width());
+        let bottom = Rect::from_center_size(Pos2::new(inner.center().x, inner.max.y - 20.0), EVec2::new(w + 2.0, 40.0));
         let mut bc = ui.new_child(UiBuilder::new().max_rect(bottom).layout(Layout::left_to_right(Align::Center)));
-        let resp = overlay_frame(t).inner_margin(egui::Margin::symmetric(8, 6)).show(&mut bc, |ui| {
+        overlay_frame(t).inner_margin(egui::Margin::symmetric(8, 6)).show(&mut bc, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            chip(ui, &mut s.show_point, "Point P", Some(hex32(calc_view::C_POINT)));
-            chip(ui, &mut s.show_tangent_x, "Tangent x", Some(hex32(calc_view::C_TAN_X)));
-            chip(ui, &mut s.show_tangent_y, "Tangent y", Some(hex32(calc_view::C_TAN_Y)));
-            chip(ui, &mut s.show_plane, "Tangent plane", Some(hex32(calc_view::C_PLANE)));
-            chip(ui, &mut s.show_sections, "Sections", None);
-            chip(ui, &mut s.show_gradient, "Gradient", Some(hex32(calc_view::C_GRAD)));
-            chip(ui, &mut s.show_grid, "Grid", None);
-            chip(ui, &mut s.show_ticks, "Ticks", None);
+            for (v, full, brief, color, tip) in chips {
+                let label = if short { brief } else { full };
+                chip(ui, v, label, color.map(hex32)).on_hover_text(if short { format!("{full}: {tip}") } else { tip.to_string() });
+            }
         });
-        let _ = resp;
-
     }
 
     /// Shift+click: move P to the surface sample nearest the cursor.
@@ -962,6 +1290,28 @@ fn readout(ui: &mut Ui, t: &Tokens, d: Option<&PointDerivs>) {
     }
 }
 
+/// Label / hint on the left, value on the right.
+fn kv(ui: &mut Ui, t: &Tokens, name: &str, hint: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(name).color(t.text));
+        if !hint.is_empty() {
+            ui.label(RichText::new(hint).size(11.0).color(t.faint));
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(value).monospace().size(14.0).color(t.text));
+        });
+    });
+}
+
+fn wrap_deg(a: f64) -> f64 {
+    let w = (a + 180.0).rem_euclid(360.0) - 180.0;
+    if w == -180.0 { 180.0 } else { w }
+}
+
+fn fmt_sci(v: f64) -> String {
+    if v == 0.0 { "0".into() } else { format!("{v:.1e}") }
+}
+
 fn hex32(c: u32) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
@@ -986,6 +1336,10 @@ fn round_to(v: f64, r: (f64, f64)) -> f64 {
 pub fn fmt_val(v: f64) -> String {
     if !v.is_finite() {
         return "undefined".into();
+    }
+    // Rounding noise such as 3e-15 at a critical point.
+    if v != 0.0 && v.abs() < 1e-12 {
+        return "≈ 0".into();
     }
     if v != 0.0 && (v.abs() >= 1e6 || v.abs() < 1e-4) {
         return format!("{v:.4e}");

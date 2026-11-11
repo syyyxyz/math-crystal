@@ -195,6 +195,9 @@ fn grid_points(xr: (f64, f64), yr: (f64, f64), n: usize) -> (Vec<f64>, Vec<f64>)
 /// Optional region condition such as `x^2 + y^2 <= 1`.
 pub struct Region {
     prog: Program,
+    /// For a single comparison `a <= b`: a smooth margin (positive inside)
+    /// whose zero set is the boundary.
+    margin: Option<Program>,
     pub source: String,
 }
 
@@ -202,7 +205,27 @@ impl Region {
     pub fn new(src: &str) -> Result<Self, crate::expr::ParseError> {
         let mut pool = Pool::new();
         let id = parse(src, &mut pool, &Vars(vec!["x", "y"]), false)?;
-        Ok(Self { prog: Program::compile(&pool, &[id]), source: src.to_string() })
+        use crate::expr::{Bin, Node};
+        let margin = match pool.node(id) {
+            Node::Bin(Bin::Lt | Bin::Le, a, b) => Some(pool.sub(b, a)),
+            Node::Bin(Bin::Gt | Bin::Ge, a, b) => Some(pool.sub(a, b)),
+            _ => None,
+        };
+        Ok(Self {
+            prog: Program::compile(&pool, &[id]),
+            margin: margin.map(|m| Program::compile(&pool, &[m])),
+            source: src.to_string(),
+        })
+    }
+
+    /// Field whose 0-level curve is the region boundary (positive inside):
+    /// the smooth margin when available, else indicator - 1/2.
+    pub fn boundary_field(&self, xr: (f64, f64), yr: (f64, f64), n: usize) -> Vec<f64> {
+        let (xs, ys) = grid_points(xr, yr, n);
+        match &self.margin {
+            Some(m) => m.eval_batch(&[&xs, &ys], xs.len()).swap_remove(0),
+            None => self.inside(&xs, &ys).into_iter().map(|v| v - 0.5).collect(),
+        }
     }
 
     /// Indicator values (1 inside, 0 outside or undefined).
@@ -210,10 +233,6 @@ impl Region {
         self.prog.eval_batch(&[xs, ys], xs.len()).swap_remove(0).into_iter().map(|v| if v.is_finite() && v != 0.0 { 1.0 } else { 0.0 }).collect()
     }
 
-    pub fn grid(&self, xr: (f64, f64), yr: (f64, f64), n: usize) -> Vec<f64> {
-        let (xs, ys) = grid_points(xr, yr, n);
-        self.inside(&xs, &ys)
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -323,6 +342,21 @@ mod tests {
         // (0,0) saddle, (±pi/2, ±pi/2) extrema: 5 points in [-3, 3]^2.
         assert_eq!(c.len(), 5, "{c:?}");
         assert_eq!(c.iter().filter(|c| c.kind == CriticalKind::Saddle).count(), 1);
+    }
+
+    #[test]
+    fn smooth_region_boundary() {
+        let disc = Region::new("x^2 + y^2 <= 1").unwrap();
+        let n = 41;
+        let f = disc.boundary_field((-2.0, 2.0), (-2.0, 2.0), n);
+        for seg in contour(&f, n, (-2.0, 2.0), (-2.0, 2.0), 0.0) {
+            for (x, y) in seg {
+                assert!((x.hypot(y) - 1.0).abs() < 0.01, "{x} {y}");
+            }
+        }
+        // Compound conditions fall back to the indicator.
+        let ring = Region::new("1 <= x^2 + y^2 <= 4").unwrap();
+        assert!(ring.margin.is_none());
     }
 
     #[test]

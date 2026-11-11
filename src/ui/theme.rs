@@ -33,6 +33,8 @@ pub mod icon {
     pub const LIGHTBULB: &str = "\u{F0336}";
     pub const DOT: &str = "\u{F09DE}";
     pub const CURVE: &str = "\u{F0559}";
+    pub const MAP: &str = "\u{F0982}";
+    pub const COMPASS: &str = "\u{F018C}";
 }
 
 pub fn icons_available() -> bool {

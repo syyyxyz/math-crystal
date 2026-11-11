@@ -46,6 +46,13 @@ pub struct Settings {
     pub show_plane: bool,
     pub show_sections: bool,
     pub show_gradient: bool,
+    pub show_contours: bool,
+    pub show_field: bool,
+    pub show_direction: bool,
+    /// Direction of u for the directional derivative, degrees from +x.
+    pub dir_angle: f64,
+    pub show_criticals: bool,
+    pub show_region: bool,
     pub show_grid: bool,
     pub show_ticks: bool,
     pub theme: Theme,
@@ -75,6 +82,12 @@ impl Default for Settings {
             show_plane: false,
             show_sections: false,
             show_gradient: false,
+            show_contours: false,
+            show_field: false,
+            show_direction: false,
+            dir_angle: 45.0,
+            show_criticals: false,
+            show_region: false,
             show_grid: false,
             show_ticks: true,
             theme: Theme::Light,
@@ -122,6 +135,27 @@ pub const C_TAN_Y: u32 = 0xd6337f;
 pub const C_POINT: u32 = 0xe03131;
 pub const C_GRAD: u32 = 0x2f9e44;
 pub const C_SURFACE_SOLID: u32 = 0x8fa6c8;
+pub const C_DIR: u32 = 0x7048e8;
+pub const C_REGION: u32 = 0xe8590c;
+pub const C_MIN: u32 = 0x1c7ed6;
+pub const C_MAX: u32 = 0xe03131;
+pub const C_SADDLE: u32 = 0xf59f00;
+pub const C_DEGENERATE: u32 = 0x868e96;
+
+pub fn critical_color(k: crate::analysis::CriticalKind) -> u32 {
+    use crate::analysis::CriticalKind::*;
+    match k {
+        Minimum => C_MIN,
+        Maximum => C_MAX,
+        Saddle => C_SADDLE,
+        Degenerate => C_DEGENERATE,
+    }
+}
+
+/// Contour levels for the current z range.
+pub fn contour_levels(s: &Settings) -> Vec<f64> {
+    crate::analysis::levels(s.zr.0, s.zr.1, 12)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LabelKind {
@@ -154,6 +188,51 @@ pub fn auto_z(z: &[f64]) -> Option<(f64, f64)> {
         return Some((lo - 1.0, hi + 1.0));
     }
     Some((lo - 0.08 * span, hi + 0.08 * span))
+}
+
+/// Critical-point markers and the integration-region outline, drawn on top
+/// of a built scene. `region` is a row-major indicator grid.
+pub fn analysis_layers(
+    surf: &Surface,
+    s: &Settings,
+    frame: &Frame3,
+    criticals: &[crate::analysis::Critical],
+    region: Option<(&[f64], usize)>,
+    scene: &mut Scene,
+) {
+    if s.show_criticals {
+        for c in criticals {
+            let p = frame.map_xyz(c.x, c.y, c.f);
+            if p.abs().cmpgt(frame.half * 1.001).any() {
+                continue;
+            }
+            scene.meshes.push(sphere(p, 0.04, hex(critical_color(c.kind), 1.0)));
+            // Drop line to the floor.
+            let floor = Vec3::new(p.x, p.y, -frame.half.z);
+            scene.lines.push(line(p, floor, hex(critical_color(c.kind), 0.6), 1.2, false));
+        }
+    }
+    if s.show_region
+        && let Some((ind, n)) = region
+    {
+        let floor = -frame.half.z + 0.003;
+        let col = hex(C_REGION, 1.0);
+        for seg in crate::analysis::contour(ind, n, s.xr, s.yr, 0.0) {
+            let mut a = frame.map_xyz(seg[0].0, seg[0].1, s.zr.0);
+            let mut b = frame.map_xyz(seg[1].0, seg[1].1, s.zr.0);
+            a.z = floor;
+            b.z = floor;
+            scene.lines.push(line(a, b, col, 2.4, true));
+            // Same boundary lifted onto the surface.
+            let fa = surf.f(seg[0].0, seg[0].1);
+            let fb = surf.f(seg[1].0, seg[1].1);
+            if fa.is_finite() && fb.is_finite() {
+                let a = frame.map_xyz(seg[0].0, seg[0].1, fa);
+                let b = frame.map_xyz(seg[1].0, seg[1].1, fb);
+                scene.lines.push(line(a, b, col, 2.4, true));
+            }
+        }
+    }
 }
 
 pub struct Built {
@@ -276,6 +355,78 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
         }
         if s.show_point {
             scene.meshes.push(sphere(p, 0.05, hex(C_POINT, 1.0)));
+        }
+    }
+    if s.show_direction && d.first_ok() {
+        let (c, sn) = (s.dir_angle.to_radians().cos(), s.dir_angle.to_radians().sin());
+        let du = d.fx.v * c + d.fy.v * sn;
+        let span = (s.xr.1 - s.xr.0).min(s.yr.1 - s.yr.0) * 0.3;
+        let a = frame.map_xyz(s.a - c * span, s.b - sn * span, d.f - du * span);
+        let b = frame.map_xyz(s.a + c * span, s.b + sn * span, d.f + du * span);
+        scene.lines.push(line(a, b, hex(C_DIR, 1.0), width + 1.0, true));
+        // Its shadow on the floor shows the direction itself.
+        let fa = frame.map_xyz(s.a, s.b, s.zr.0);
+        let fb = frame.map_xyz(s.a + c * span, s.b + sn * span, s.zr.0);
+        scene.lines.push(line(fa, fb, hex(C_DIR, 0.7), width, true));
+    }
+    if s.show_contours {
+        let levels = contour_levels(s);
+        let (lo, hi) = (s.zr.0, s.zr.1);
+        let floor = frame.half.z * -1.0 + 0.002;
+        for &lv in &levels {
+            let t = ((lv - lo) / (hi - lo)) as f32;
+            let col = crate::render::scene::lin(crate::render::scene::viridis(0.08 + 0.84 * t), 1.0);
+            let on_surface = [0.05, 0.05, 0.08, 0.75];
+            for seg in crate::analysis::contour(&z, n, s.xr, s.yr, lv) {
+                let a = frame.map_xyz(seg[0].0, seg[0].1, lv);
+                let b = frame.map_xyz(seg[1].0, seg[1].1, lv);
+                scene.lines.push(line(a, b, on_surface, 1.6, true));
+                let mut fa = a;
+                let mut fb = b;
+                fa.z = floor;
+                fb.z = floor;
+                scene.lines.push(line(fa, fb, col, 1.8, true));
+            }
+        }
+    }
+    if s.show_field {
+        // Normalised gradient arrows on the floor, length ~ relative size.
+        let m = 15;
+        let mut xs = Vec::with_capacity(m * m);
+        let mut ys = Vec::with_capacity(m * m);
+        for j in 0..m {
+            for i in 0..m {
+                xs.push(crate::calc::lerp(s.xr, (i as f64 + 0.5) / m as f64));
+                ys.push(crate::calc::lerp(s.yr, (j as f64 + 0.5) / m as f64));
+            }
+        }
+        let all = surf.eval_all(&xs, &ys);
+        let sc = frame.scale();
+        let g: Vec<Vec2> = (0..m * m).map(|k| Vec2::new(all[1][k] as f32 * sc.x, all[2][k] as f32 * sc.y)).collect();
+        let gmax = g.iter().map(|v| v.length()).filter(|v| v.is_finite()).fold(0.0f32, f32::max);
+        let cell = (frame.half.x.min(frame.half.y) * 2.0) / m as f32;
+        let floor = -frame.half.z + 0.004;
+        // Neutral ink so the arrows read apart from the coloured contours.
+        let col = if s.theme == Theme::Dark { hex(0xd5d9e2, 0.9) } else { hex(0x2f3542, 0.85) };
+        for k in 0..m * m {
+            let v = g[k];
+            if !v.is_finite() || gmax <= 0.0 {
+                continue;
+            }
+            let len = v.length();
+            if len < 1e-9 * gmax {
+                continue;
+            }
+            let dir = v / len;
+            let l = cell * (0.25 + 0.6 * (len / gmax).sqrt());
+            let c = frame.map_xyz(xs[k], ys[k], s.zr.0);
+            let base = Vec3::new(c.x, c.y, floor) - Vec3::new(dir.x, dir.y, 0.0) * l * 0.5;
+            let tip = base + Vec3::new(dir.x, dir.y, 0.0) * l;
+            scene.lines.push(line(base, tip, col, 1.8, true));
+            let side = Vec3::new(-dir.y, dir.x, 0.0) * l * 0.22;
+            let back = tip - Vec3::new(dir.x, dir.y, 0.0) * l * 0.35;
+            scene.lines.push(line(tip, back + side, col, 1.8, true));
+            scene.lines.push(line(tip, back - side, col, 1.8, true));
         }
     }
     if s.show_sections && d.f.is_finite() {
