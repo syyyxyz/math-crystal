@@ -1,0 +1,31 @@
+[package]
+name = "math-crystal"
+version = "0.1.0"
+edition = "2024"
+description = "Math-crystal: a fast, compact visual math workbench"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
+egui = "0.37"
+egui_plot = "0.38"
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+rayon = "1.12"
+num-complex = "0.4"
+rustfft = "6.4"
+png = "0.18"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
+pollster = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
