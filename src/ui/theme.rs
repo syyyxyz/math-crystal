@@ -40,6 +40,8 @@ pub mod icon {
     pub const CURVE: &str = "\u{F0559}";
     pub const MAP: &str = "\u{F0982}";
     pub const COMPASS: &str = "\u{F018C}";
+    pub const PLAY: &str = "\u{F040A}";
+    pub const PAUSE: &str = "\u{F03E4}";
 }
 
 pub fn icons_available() -> bool {

@@ -27,6 +27,8 @@ enum Ins {
 pub struct Program {
     ins: Vec<Ins>,
     out: Vec<u32>,
+    /// Values of the parameters: variables numbered after the inputs.
+    params: Vec<f64>,
 }
 
 impl Program {
@@ -62,7 +64,17 @@ impl Program {
             ins.push(op);
         }
         let out = roots.iter().map(|id| reg[id.0 as usize]).collect();
-        Self { ins, out }
+        Self { ins, out, params: Vec::new() }
+    }
+
+    /// Set the parameter values. A variable whose index is past the inputs
+    /// given to an evaluation is a parameter (in order); unset ones are NaN.
+    pub fn set_params(&mut self, values: &[f64]) {
+        self.params = values.to_vec();
+    }
+
+    fn param(&self, v: u8, inputs: usize) -> f64 {
+        self.params.get(v as usize - inputs).copied().unwrap_or(f64::NAN)
     }
 
     pub fn outputs(&self) -> usize {
@@ -129,7 +141,8 @@ impl Program {
             match *ins {
                 Ins::Const(c) => d.fill(c),
                 Ins::I => d.fill(f64::NAN),
-                Ins::Var(v) => d.copy_from_slice(&inputs[v as usize][s..s + len]),
+                Ins::Var(v) if (v as usize) < inputs.len() => d.copy_from_slice(&inputs[v as usize][s..s + len]),
+                Ins::Var(v) => d.fill(self.param(v, inputs.len())),
                 Ins::Un(op, a) => {
                     let a = src(a);
                     macro_rules! map {
@@ -221,7 +234,8 @@ impl Program {
             match *ins {
                 Ins::Const(c) => d.fill(C64::new(c, 0.0)),
                 Ins::I => d.fill(C64::new(0.0, 1.0)),
-                Ins::Var(v) => d.copy_from_slice(&inputs[v as usize][s..s + len]),
+                Ins::Var(v) if (v as usize) < inputs.len() => d.copy_from_slice(&inputs[v as usize][s..s + len]),
+                Ins::Var(v) => d.fill(C64::new(self.param(v, inputs.len()), 0.0)),
                 Ins::Un(op, a) => {
                     for (d, &x) in d.iter_mut().zip(src(a)) {
                         *d = un_c64(op, x);

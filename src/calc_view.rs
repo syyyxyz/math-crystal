@@ -53,6 +53,14 @@ pub struct Settings {
     pub dir_angle: f64,
     pub show_criticals: bool,
     pub show_region: bool,
+    /// Midpoint Riemann columns, `riemann_n` per axis.
+    pub show_riemann: bool,
+    pub riemann_n: usize,
+    /// Cross-section of an iterated integral: the plane x = x₀ (`slice_x`)
+    /// or y = y₀, at `slice_t` (0..1) across the domain.
+    pub show_slice: bool,
+    pub slice_x: bool,
+    pub slice_t: f64,
     pub show_grid: bool,
     pub show_ticks: bool,
     pub theme: Theme,
@@ -88,6 +96,11 @@ impl Default for Settings {
             dir_angle: 45.0,
             show_criticals: false,
             show_region: false,
+            show_riemann: false,
+            riemann_n: 12,
+            show_slice: false,
+            slice_x: true,
+            slice_t: 0.5,
             show_grid: false,
             show_ticks: true,
             theme: Theme::Light,
@@ -137,6 +150,9 @@ pub const C_GRAD: u32 = 0x2f9e44;
 pub const C_SURFACE_SOLID: u32 = 0x8fa6c8;
 pub const C_DIR: u32 = 0x7048e8;
 pub const C_REGION: u32 = 0xe8590c;
+pub const C_COL_POS: u32 = 0x4c8fe0;
+pub const C_COL_NEG: u32 = 0xe8825a;
+pub const C_SLICE: u32 = 0xae3ec9;
 pub const C_MIN: u32 = 0x1c7ed6;
 pub const C_MAX: u32 = 0xe03131;
 pub const C_SADDLE: u32 = 0xf59f00;
@@ -232,6 +248,110 @@ pub fn analysis_layers(
                 scene.lines.push(line(a, b, col, 2.4, true));
             }
         }
+    }
+}
+
+impl Settings {
+    /// Where the slice plane sits and the range it runs over.
+    pub fn slice(&self) -> (f64, (f64, f64)) {
+        if self.slice_x { (crate::calc::lerp(self.xr, self.slice_t), self.yr) } else { (crate::calc::lerp(self.yr, self.slice_t), self.xr) }
+    }
+}
+
+/// An axis-aligned box as five or six flat-shaded faces whose borders show
+/// as wire lines.
+fn push_box(m: &mut MeshData, lo: Vec3, hi: Vec3, color: [f32; 4]) {
+    let c = |x: f32, y: f32, z: f32| Vec3::new(if x > 0.0 { hi.x } else { lo.x }, if y > 0.0 { hi.y } else { lo.y }, if z > 0.0 { hi.z } else { lo.z });
+    let faces: [(Vec3, [Vec3; 4]); 6] = [
+        (Vec3::Z, [c(0., 0., 1.), c(1., 0., 1.), c(1., 1., 1.), c(0., 1., 1.)]),
+        (-Vec3::Z, [c(0., 0., 0.), c(0., 1., 0.), c(1., 1., 0.), c(1., 0., 0.)]),
+        (Vec3::X, [c(1., 0., 0.), c(1., 1., 0.), c(1., 1., 1.), c(1., 0., 1.)]),
+        (-Vec3::X, [c(0., 0., 0.), c(0., 0., 1.), c(0., 1., 1.), c(0., 1., 0.)]),
+        (Vec3::Y, [c(0., 1., 0.), c(0., 1., 1.), c(1., 1., 1.), c(1., 1., 0.)]),
+        (-Vec3::Y, [c(0., 0., 0.), c(1., 0., 0.), c(1., 0., 1.), c(0., 0., 1.)]),
+    ];
+    for (normal, quad) in faces {
+        let base = m.vertices.len() as u32;
+        for (k, p) in quad.iter().enumerate() {
+            let g = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]][k];
+            m.vertices.push(crate::render::scene::MeshVertex { pos: p.to_array(), normal: normal.to_array(), color, grid: [g[0], g[1], 0.5] });
+        }
+        m.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+/// Pictures of the double integral: midpoint Riemann columns and the
+/// cross-section of an iterated integral.
+pub fn integral_layers(surf: &Surface, s: &Settings, frame: &Frame3, region: Option<&crate::analysis::Region>, scene: &mut Scene) {
+    let clamp_z = |z: f64| z.clamp(s.zr.0, s.zr.1);
+    let z0 = clamp_z(0.0);
+    if s.show_riemann {
+        let n = s.riemann_n.clamp(1, 80);
+        let (_, heights) = crate::analysis::riemann(surf, s.xr, s.yr, region, n);
+        let mut mesh = MeshData::default();
+        // A sliver between columns keeps their edges apart.
+        let gap = 0.04 / n as f64;
+        for j in 0..n {
+            for i in 0..n {
+                let h = heights[j * n + i];
+                if !h.is_finite() {
+                    continue;
+                }
+                let x = |t: f64| crate::calc::lerp(s.xr, (i as f64 + t) / n as f64);
+                let y = |t: f64| crate::calc::lerp(s.yr, (j as f64 + t) / n as f64);
+                let (a, b) = (z0.min(clamp_z(h)), z0.max(clamp_z(h)));
+                let lo = frame.map_xyz(x(gap), y(gap), a);
+                let mut hi = frame.map_xyz(x(1.0 - gap), y(1.0 - gap), b);
+                // Zero height still shows as a tile.
+                hi.z = hi.z.max(lo.z + 0.002);
+                push_box(&mut mesh, lo, hi, hex(if h >= 0.0 { C_COL_POS } else { C_COL_NEG }, 1.0));
+            }
+        }
+        scene.meshes.push(mesh);
+    }
+    if s.show_slice {
+        let (c, range) = s.slice();
+        let m = 241;
+        let us: Vec<f64> = (0..m).map(|k| crate::calc::lerp(range, k as f64 / (m - 1) as f64)).collect();
+        let cs = vec![c; m];
+        let (xs, ys) = if s.slice_x { (&cs, &us) } else { (&us, &cs) };
+        let mut f = surf.eval_f_batch(xs, ys);
+        if let Some(r) = region {
+            for (v, inside) in f.iter_mut().zip(r.inside(xs, ys)) {
+                if inside == 0.0 {
+                    *v = f64::NAN;
+                }
+            }
+        }
+        let normal = if s.slice_x { Vec3::X } else { Vec3::Y };
+        let mut mesh = MeshData { translucent: true, ..Default::default() };
+        let color = hex(C_SLICE, 0.5);
+        let mut top: Vec<Option<Vec3>> = Vec::with_capacity(m);
+        let mut base: Vec<Option<Vec3>> = Vec::with_capacity(m);
+        for k in 0..m {
+            if !f[k].is_finite() {
+                top.push(None);
+                base.push(None);
+                continue;
+            }
+            let t = frame.map_xyz(xs[k], ys[k], clamp_z(f[k]));
+            let b = frame.map_xyz(xs[k], ys[k], z0);
+            mesh.vertices.push(crate::render::scene::MeshVertex { pos: b.to_array(), normal: normal.to_array(), color, grid: [0.0; 3] });
+            mesh.vertices.push(crate::render::scene::MeshVertex { pos: t.to_array(), normal: normal.to_array(), color, grid: [0.0; 3] });
+            if k > 0 && top[k - 1].is_some() {
+                let i = mesh.vertices.len() as u32 - 4;
+                mesh.indices.extend_from_slice(&[i, i + 2, i + 3, i, i + 3, i + 1]);
+            }
+            top.push(Some(t));
+            base.push(Some(b));
+        }
+        scene.meshes.push(mesh);
+        let line_col = hex(C_SLICE, 1.0);
+        polyline(&mut scene.lines, &top, line_col, 3.0);
+        polyline(&mut scene.lines, &base, line_col, 1.6);
+        // Where the plane meets the floor of the box.
+        let (p, q) = if s.slice_x { (frame.map_xyz(c, s.yr.0, s.zr.0), frame.map_xyz(c, s.yr.1, s.zr.0)) } else { (frame.map_xyz(s.xr.0, c, s.zr.0), frame.map_xyz(s.xr.1, c, s.zr.0)) };
+        scene.lines.push(line(p, q, hex(C_SLICE, 0.7), 1.6, true));
     }
 }
 

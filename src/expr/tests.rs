@@ -227,3 +227,48 @@ fn complex_evaluation() {
     let id = parse("sqrt(-1)", &mut p, &Vars(vec!["x"]), false).unwrap();
     assert!(Program::compile(&p, &[id]).eval(&[0.0])[0].is_nan());
 }
+
+#[test]
+fn parameters() {
+    use super::parse_with_params;
+    let mut p = Pool::new();
+    let mut names = Vec::new();
+    let f = parse_with_params("a*sin(k x) + y^b + a", &mut p, &xy(), false, &mut names).unwrap();
+    assert_eq!(names, ["a", "k", "b"]);
+    let mut prog = Program::compile(&p, &[f]);
+    prog.set_params(&[2.0, 3.0, 2.0]);
+    let want = |x: f64, y: f64| 2.0 * (3.0 * x).sin() + y * y + 2.0;
+    assert!((prog.eval(&[0.4, 1.5])[0] - want(0.4, 1.5)).abs() < 1e-12);
+    let (xs, ys): (Vec<f64>, Vec<f64>) = (0..200).map(|k| (k as f64 * 0.01, 1.0 + k as f64 * 0.02)).unzip();
+    let out = prog.eval_batch(&[&xs, &ys], 200);
+    assert!((out[0][150] - want(xs[150], ys[150])).abs() < 1e-12);
+    // Derivatives treat parameters as constants and keep their names.
+    let fx = p.diff(f, 0);
+    assert_eq!(p.to_string(fx, &["x", "y", "a", "k", "b"]), "a*k*cos(k*x)");
+    // Without parameters the same input is still an error, and typos in
+    // variable-like names are never taken as parameters.
+    assert!(parse("a*x", &mut p, &xy(), false).is_err());
+    for bad in ["x*t", "ab*x", "x + z"] {
+        assert!(parse_with_params(bad, &mut p, &xy(), false, &mut Vec::new()).is_err(), "{bad}");
+    }
+    // LaTeX: adjacent letters multiply, Greek commands work.
+    let mut names = Vec::new();
+    parse_with_params("\\frac{ax}{b} + \\omega y", &mut p, &xy(), false, &mut names).unwrap();
+    assert_eq!(names, ["a", "b", "ω"]);
+}
+
+#[test]
+fn powers_keep_their_domain() {
+    let mut p = Pool::new();
+    let f = parse("(x^0.5)^2", &mut p, &xy(), false).unwrap();
+    assert!(Program::compile(&p, &[f]).eval(&[-1.0, 0.0])[0].is_nan());
+    let g = parse("(x^2)^3", &mut p, &xy(), false).unwrap();
+    assert_eq!(p.to_string(g, &["x", "y"]), "x^6");
+    // exp(u)^v must not print as a double superscript.
+    let h = parse("exp(x)^y", &mut p, &xy(), false).unwrap();
+    let tex = p.to_latex(h, &["x", "y"]);
+    assert_eq!(tex, "\\left(e^{x}\\right)^{y}");
+    let back = parse(&tex, &mut p, &xy(), false).unwrap();
+    let v = |id| Program::compile(&p, &[id]).eval(&[0.7, 1.3])[0];
+    assert!((v(h) - v(back)).abs() < 1e-12);
+}

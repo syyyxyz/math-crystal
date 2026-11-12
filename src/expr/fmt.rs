@@ -344,7 +344,15 @@ impl Pool {
                     s.push('}');
                 }
                 Bin::Pow => {
-                    self.tex_min(s, a, P_ATOM, vars);
+                    // exp prints as e^{..}: a bare second superscript would
+                    // be invalid TeX (and read back right-associated).
+                    if matches!(self.node(a), Node::Un(Un::Exp, _)) {
+                        s.push_str("\\left(");
+                        self.tex(s, a, vars);
+                        s.push_str("\\right)");
+                    } else {
+                        self.tex_min(s, a, P_ATOM, vars);
+                    }
                     s.push_str("^{");
                     self.tex(s, b, vars);
                     s.push('}');

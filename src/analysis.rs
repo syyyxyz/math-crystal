@@ -301,9 +301,74 @@ pub fn integrate(s: &Surface, xr: (f64, f64), yr: (f64, f64), region: Option<&Re
     }
 }
 
+/// Midpoint Riemann sum on an `n x n` grid of cells. Returns the sum and
+/// the height of each column, row-major (`NaN`: the midpoint is outside the
+/// region or f is undefined there).
+pub fn riemann(s: &Surface, xr: (f64, f64), yr: (f64, f64), region: Option<&Region>, n: usize) -> (f64, Vec<f64>) {
+    let n = n.max(1);
+    let xs: Vec<f64> = (0..n * n).map(|k| lerp(xr, ((k % n) as f64 + 0.5) / n as f64)).collect();
+    let ys: Vec<f64> = (0..n * n).map(|k| lerp(yr, ((k / n) as f64 + 0.5) / n as f64)).collect();
+    let mut h = s.eval_f_batch(&xs, &ys);
+    if let Some(r) = region {
+        for (v, inside) in h.iter_mut().zip(r.inside(&xs, &ys)) {
+            if inside == 0.0 {
+                *v = f64::NAN;
+            }
+        }
+    }
+    let cell = (xr.1 - xr.0) * (yr.1 - yr.0) / (n * n) as f64;
+    let sum = h.iter().filter(|v| v.is_finite()).sum::<f64>() * cell;
+    for v in &mut h {
+        if !v.is_finite() {
+            *v = f64::NAN;
+        }
+    }
+    (sum, h)
+}
+
+/// The inner integral of an iterated integral: `A(c) = ∫ f(c, y) dy` over
+/// `range` when `fix_x`, else `∫ f(x, c) dx` (restricted to the region).
+pub fn slice_integral(s: &Surface, fix_x: bool, c: f64, range: (f64, f64), region: Option<&Region>) -> f64 {
+    let cells = 256;
+    let h = (range.1 - range.0) / cells as f64;
+    let mut us = Vec::with_capacity(cells * 4);
+    let mut ws = Vec::with_capacity(cells * 4);
+    for k in 0..cells {
+        for (g, w) in GL_X.iter().zip(GL_W) {
+            us.push(range.0 + h * (k as f64 + 0.5 + 0.5 * g));
+            ws.push(w * h * 0.5);
+        }
+    }
+    let cs = vec![c; us.len()];
+    let (xs, ys) = if fix_x { (&cs, &us) } else { (&us, &cs) };
+    let f = s.eval_f_batch(xs, ys);
+    let ind = region.map(|r| r.inside(xs, ys));
+    (0..us.len()).filter(|&k| f[k].is_finite()).map(|k| ws[k] * f[k] * ind.as_ref().map_or(1.0, |i| i[k])).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn riemann_sums_and_slices() {
+        let s = Surface::new("x^2 + y^2").unwrap();
+        // Midpoint rule on [-1,1]^2: error 8/(3 n^2) for this f.
+        for n in [4usize, 16] {
+            let (sum, h) = riemann(&s, (-1.0, 1.0), (-1.0, 1.0), None, n);
+            assert_eq!(h.len(), n * n);
+            assert!((sum - (8.0 / 3.0 - 8.0 / (3.0 * (n * n) as f64))).abs() < 1e-12, "{n}: {sum}");
+        }
+        // Columns outside the region are dropped.
+        let disc = Region::new("x^2 + y^2 <= 1").unwrap();
+        let (_, h) = riemann(&s, (-1.0, 1.0), (-1.0, 1.0), Some(&disc), 8);
+        assert!(h[0].is_nan() && h[8 * 4 + 4].is_finite());
+        // A(x) = ∫_{-1}^{1} (x^2 + y^2) dy = 2x^2 + 2/3.
+        assert!((slice_integral(&s, true, 0.5, (-1.0, 1.0), None) - (0.5 + 2.0 / 3.0)).abs() < 1e-12);
+        // Through the disc at x = 0.6: y in [-0.8, 0.8].
+        let a = slice_integral(&s, true, 0.6, (-1.0, 1.0), Some(&disc));
+        assert!((a - (0.36 * 1.6 + 2.0 * 0.512 / 3.0)).abs() < 2e-3, "{a}");
+    }
 
     #[test]
     fn contour_of_circle() {

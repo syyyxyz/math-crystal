@@ -2,6 +2,7 @@
 pub mod canvas3d;
 pub mod export;
 pub mod mathview;
+pub mod params;
 pub mod plane;
 pub mod theme;
 pub mod widgets;

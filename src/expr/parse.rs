@@ -111,12 +111,38 @@ struct Parser<'a> {
     vars: &'a Vars,
     allow_i: bool,
     depth: usize,
+    /// When present, unknown single-letter names become parameters.
+    params: Option<&'a mut Vec<String>>,
 }
 
 const MAX_DEPTH: usize = 200;
+/// Most parameters one expression may introduce.
+pub const MAX_PARAMS: usize = 8;
+
+/// Whether an otherwise unknown name is taken as a parameter: one Latin or
+/// Greek letter, optionally followed by digits (`a`, `k2`, `T`, `ω`). The
+/// usual variable names and constants (x, y, z, t, e, i, j, f, π, τ) are
+/// left out so that typos in them still give an error.
+pub fn is_param_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(c) = chars.next() else { return false };
+    let letter = c.is_ascii_alphabetic() || ('α'..='ω').contains(&c) || ('Α'..='Ω').contains(&c);
+    letter && !matches!(c, 'x' | 'y' | 'z' | 't' | 'e' | 'i' | 'j' | 'f' | 'π' | 'τ') && chars.all(|d| d.is_ascii_digit())
+}
 
 /// Parse `src` into `pool`. `allow_i` enables the imaginary unit `i`.
 pub fn parse(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool) -> Result<Id, ParseError> {
+    parse_inner(src, pool, vars, allow_i, None)
+}
+
+/// Like [`parse`], but names accepted by [`is_param_name`] become
+/// parameters: variables numbered after `vars`, in order of first use;
+/// their names are appended to `params`.
+pub fn parse_with_params(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool, params: &mut Vec<String>) -> Result<Id, ParseError> {
+    parse_inner(src, pool, vars, allow_i, Some(params))
+}
+
+fn parse_inner(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool, params: Option<&mut Vec<String>>) -> Result<Id, ParseError> {
     // LaTeX is translated first; error columns then refer to the translation,
     // which the UI shows next to the input.
     let translated;
@@ -126,6 +152,9 @@ pub fn parse(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool) -> Result<I
     } else {
         super::latex::strip_lhs(src)
     };
+    if params.is_some() {
+        pool.first_param = Some(vars.0.len() as u8);
+    }
     let toks = lex(src)?;
     if toks.len() == 1 {
         return Err(ParseError {
@@ -140,6 +169,7 @@ pub fn parse(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool) -> Result<I
         vars,
         allow_i,
         depth: 0,
+        params,
     };
     let id = p.or()?;
     match p.peek() {
@@ -391,10 +421,29 @@ impl Parser<'_> {
             _ => {}
         }
         let Some(spec) = function(name) else {
-            let hint = if name.len() > 1
+            if let Some(params) = self.params.as_deref_mut()
+                && is_param_name(name)
+            {
+                let k = match params.iter().position(|p| p == name) {
+                    Some(k) => k,
+                    None if params.len() >= MAX_PARAMS => {
+                        return Err(ParseError {
+                            msg: if zh() { format!("参数太多（最多 {MAX_PARAMS} 个）：'{name}'") } else { format!("Too many parameters (at most {MAX_PARAMS}): '{name}'") },
+                            pos,
+                        });
+                    }
+                    None => {
+                        params.push(name.to_string());
+                        params.len() - 1
+                    }
+                };
+                return Ok(self.pool.var((self.vars.0.len() + k) as u8));
+            }
+            let with_params = self.params.is_some();
+            let hint = if name.chars().count() > 1
                 && name
                     .chars()
-                    .all(|c| self.vars.index(&c.to_string()).is_some())
+                    .all(|c| self.vars.index(&c.to_string()).is_some() || (with_params && is_param_name(&c.to_string())))
             {
                 let parts: Vec<String> = name.chars().map(String::from).collect();
                 format!(" ({} {})", tr("for a product write", "乘积请写成"), parts.join("*"))

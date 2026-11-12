@@ -11,7 +11,7 @@ use num_complex::Complex64 as C64;
 use crate::app::{fmt_sci, fmt_short, fmt_val, kv};
 use crate::complex_app::fmt_c;
 use crate::i18n::{self, tr};
-use crate::spectrum::{Convention, Signal, Spectrum, Support, Symmetry, symmetry};
+use crate::spectrum::{Convention, Sampled, Signal, Spectrum, Support, Symmetry, symmetry};
 use crate::ui::export::{self, Export};
 use crate::ui::mathview;
 use crate::ui::theme::{Tokens, icon, tokens, with_icon};
@@ -56,6 +56,7 @@ struct Stats {
 pub struct SpectrumWorkspace {
     src: String,
     sig: Option<Signal>,
+    params: crate::ui::params::Params,
     error: Option<String>,
     conv: Convention,
     auto_window: bool,
@@ -104,6 +105,17 @@ pub struct SpectrumWorkspace {
     grab: Option<usize>,
     /// Put Ω back to a quarter of the range for a new signal.
     recon_fresh: bool,
+    // Sampling and the DFT.
+    samp_on: bool,
+    /// Sampling period.
+    samp_ts: f64,
+    /// N is whatever covers the time window (else `samp_n`).
+    samp_auto_n: bool,
+    samp_n: usize,
+    samp: Option<Sampled>,
+    samp_key: String,
+    /// Pick a sampling period that suits a new signal.
+    samp_fresh: bool,
 }
 
 impl Default for SpectrumWorkspace {
@@ -117,12 +129,14 @@ const C_IM: Color32 = Color32::from_rgb(0xf0, 0x8c, 0x00);
 const C_RECON: Color32 = Color32::from_rgb(0xe0, 0x31, 0x31);
 const C_W0: Color32 = Color32::from_rgb(0x70, 0x48, 0xe8);
 const C_T0: Color32 = Color32::from_rgb(0x0c, 0xa6, 0x78);
+const C_SAMP: Color32 = Color32::from_rgb(0xd6, 0x33, 0x6c);
 
 impl SpectrumWorkspace {
     pub fn new(src: &str) -> Self {
         let mut s = Self {
             src: src.to_string(),
             sig: None,
+            params: Default::default(),
             error: None,
             conv: Convention::Angular,
             auto_window: true,
@@ -158,9 +172,21 @@ impl SpectrumWorkspace {
             snapped: None,
             grab: None,
             recon_fresh: true,
+            samp_on: false,
+            samp_ts: 0.2,
+            samp_auto_n: true,
+            samp_n: 32,
+            samp: None,
+            samp_key: String::new(),
+            samp_fresh: true,
         };
         s.recompile();
         s
+    }
+
+    /// Turn the sampling layer on (used by the preview example).
+    pub fn show_sampling(&mut self) {
+        self.samp_on = true;
     }
 
     pub fn set_function(&mut self, src: &str) {
@@ -174,7 +200,9 @@ impl SpectrumWorkspace {
 
     fn recompile(&mut self) {
         match Signal::new(self.src.trim()) {
-            Ok(s) => {
+            Ok(mut s) => {
+                self.params.sync(&s.params);
+                s.set_params(&self.params.values());
                 let changed = self.sig.as_ref().is_none_or(|o| o.source != s.source);
                 self.sig = Some(s);
                 self.error = None;
@@ -182,6 +210,7 @@ impl SpectrumWorkspace {
                     self.support = None;
                     self.reset_plots = true;
                     self.recon_fresh = true;
+                    self.samp_fresh = true;
                 }
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -217,6 +246,12 @@ impl SpectrumWorkspace {
             if std::mem::take(&mut self.recon_fresh) || self.recon_w > sp.w_max {
                 self.recon_w = sp.w_max / 4.0;
             }
+            if std::mem::take(&mut self.samp_fresh) {
+                // Nyquist frequency at half the displayed range: some
+                // aliasing to look at for most signals.
+                self.samp_ts = std::f64::consts::TAU / sp.w_max;
+            }
+            self.samp_key.clear();
             self.reset_plots = true;
             self.spec = Some(sp);
             self.compute_ms = t0.elapsed().as_secs_f64() * 1e3;
@@ -233,6 +268,27 @@ impl SpectrumWorkspace {
                 self.recon_key = key;
             }
         }
+    }
+
+    /// Recompute the samples and their spectrum when their inputs changed.
+    fn update_sampling(&mut self) {
+        let (Some(sp), Some(sig), true) = (&self.spec, &self.sig, self.samp_on) else { return };
+        let key = format!("{}|{}|{}|{}", self.spec_key, self.samp_ts, self.samp_auto_n, self.samp_n);
+        if key == self.samp_key {
+            return;
+        }
+        let ts = self.samp_ts;
+        let (a, b) = self.window;
+        // Samples sit at integer multiples of T_s, so t = 0 is one of them.
+        let (n0, n) = if self.samp_auto_n {
+            let (n0, n1) = ((a / ts).ceil() as i64, (b / ts).floor() as i64);
+            (n0, ((n1 - n0 + 1).max(1) as usize).min(1 << 16))
+        } else {
+            let centre = ((a + b) / 2.0 / ts).round() as i64;
+            (centre - self.samp_n as i64 / 2, self.samp_n)
+        };
+        self.samp = Some(sig.sampled(ts, n0, n, sp.w_max));
+        self.samp_key = key;
     }
 
     /// Frequency-axis symbol and unit.
@@ -260,6 +316,7 @@ impl SpectrumWorkspace {
                 });
             });
         self.update();
+        self.update_sampling();
         if std::mem::take(&mut self.dirty) {
             ui.ctx().request_repaint();
         }
@@ -344,7 +401,7 @@ impl SpectrumWorkspace {
                     egui::Frame::new().fill(t.input).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         egui::ScrollArea::horizontal().id_salt("sf_preview").show(ui, |ui| {
-                            if !mathview::show(ui, pool, id, &crate::spectrum::VARS, "f(t)", 17.0, t.text) {
+                            if !mathview::show(ui, pool, id, &sig.names(), "f(t)", 17.0, t.text) {
                                 ui.label(RichText::new(&sig.source).monospace().size(12.5));
                             }
                         });
@@ -387,6 +444,16 @@ impl SpectrumWorkspace {
         );
         if let Some(f) = pick {
             self.set_function(f);
+        }
+        let ch = self.params.ui(ui, "spectrum_params");
+        if ch.changed
+            && let Some(sig) = &mut self.sig
+        {
+            sig.set_params(&self.params.values());
+            self.spec_key.clear();
+            if self.auto_window {
+                self.support = None;
+            }
         }
 
         // ---- Transform convention ----
@@ -555,6 +622,104 @@ impl SpectrumWorkspace {
         self.recon_on = on || reveal;
         self.recon_w = conv.to_omega(omega);
 
+        // ---- Sampling and DFT ----
+        let tau = std::f64::consts::TAU;
+        let mut on = self.samp_on;
+        let mut reveal = false;
+        let mut ts = self.samp_ts;
+        let mut auto_n = self.samp_auto_n;
+        let mut n = self.samp_n;
+        let count = self.samp.as_ref().filter(|_| self.samp_on).map(|s| s.x.len());
+        let beyond = self.spec.as_ref().map(|sp| 1.0 - sp.energy_within(tau / ts / 2.0));
+        let band99 = self.stats.as_ref().map(|s| s.band99);
+        let (ts_lo, ts_hi) = (tau / (8.0 * self.w_max), tau / (self.w_max / 16.0));
+        card(
+            ui,
+            "s_sampling",
+            icon::DOT,
+            tr("Sampling and DFT", "采样与 DFT"),
+            false,
+            |ui| {
+                eye(ui, &mut on, tr("Show the samples and their spectrum", "显示采样点及其频谱"));
+            },
+            |ui| {
+                caption(
+                    ui,
+                    tr(
+                        "Sample f every Tₛ: the spectrum becomes copies of F repeated every ωₛ = 2π/Tₛ and added up. Where the copies overlap they cannot be told apart: aliasing.",
+                        "每隔 Tₛ 对 f 采样：频谱变成 F 每隔 ωₛ = 2π/Tₛ 重复一次再相加。重复的部分一旦重叠就分不开了，这就是混叠。",
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Tₛ").color(t.muted));
+                    // Edit a copy: the slider rounds what it shows.
+                    let mut shown = ts;
+                    if ui.add(egui::Slider::new(&mut shown, ts_lo..=ts_hi).logarithmic(true).max_decimals(4)).changed() {
+                        ts = shown;
+                        reveal = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Tₛ ÷ 2").on_hover_text(tr("Sample twice as fast", "采样快一倍")).clicked() {
+                        ts /= 2.0;
+                        reveal = true;
+                    }
+                    if ui.button("Tₛ × 2").on_hover_text(tr("Sample half as fast", "采样慢一倍")).clicked() {
+                        ts *= 2.0;
+                        reveal = true;
+                    }
+                    if let Some(b) = band99
+                        && ui.button(tr("Fit 99% band", "刚好容纳 99% 带宽")).on_hover_text(tr("ωₛ/2 = the band holding 99% of the energy", "让 ωₛ/2 等于包含 99% 能量的带宽")).clicked()
+                    {
+                        ts = tau / (2.0 * b);
+                        reveal = true;
+                    }
+                });
+                let ws = tau / ts;
+                match conv {
+                    Convention::Angular => kv(ui, &t, "ωₛ", "= 2π/Tₛ", &fmt_val(ws)),
+                    Convention::Hertz => kv(ui, &t, "νₛ", "= 1/Tₛ", &fmt_val(1.0 / ts)),
+                }
+                kv(ui, &t, tr("Nyquist", "奈奎斯特频率"), &format!("{w}ₛ/2"), &fmt_val(conv.from_omega(ws / 2.0)));
+                if let Some(e) = beyond {
+                    let e = e.max(0.0);
+                    kv(ui, &t, tr("energy beyond it", "此频率以外的能量"), tr("folds back", "会折叠回来"), &format!("{}%", fmt_short(e * 100.0)));
+                    if e < 1e-3 {
+                        badge(ui, &with_icon(icon::CHECK, tr("almost no aliasing", "几乎没有混叠")), t.ok);
+                    } else {
+                        badge(ui, &with_icon(icon::ALERT, tr("aliasing: the copies overlap", "有混叠：相邻的重复频谱重叠")), t.warn);
+                    }
+                }
+                ui.separator();
+                ui.checkbox(&mut auto_n, tr("N samples cover the whole window", "N 个样本覆盖整个时间窗"));
+                ui.add_enabled_ui(!auto_n, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("N").color(t.muted));
+                        reveal |= ui.add(egui::Slider::new(&mut n, 2..=512).logarithmic(true)).changed();
+                    });
+                });
+                if let Some(nn) = count {
+                    kv(ui, &t, "N", tr("points in the DFT", "DFT 点数"), &nn.to_string());
+                    kv(ui, &t, &format!("Δ{w}"), &format!("= {w}ₛ/N"), &fmt_val(conv.from_omega(ws / nn as f64)));
+                    kv(ui, &t, tr("record length", "记录时长"), "N·Tₛ", &fmt_val(nn as f64 * ts));
+                }
+                caption(
+                    ui,
+                    tr(
+                        "The dots are the N DFT values: the periodic spectrum read off every ωₛ/N. Fewer samples (a shorter record) put the dots further apart and smear the spectrum.",
+                        "圆点就是 N 个 DFT 值：在这条周期频谱上每隔 ωₛ/N 读一个点。样本越少（记录越短），圆点越稀，频谱也被抹得越宽。",
+                    ),
+                );
+            },
+        );
+        if auto_n != self.samp_auto_n {
+            reveal = true;
+        }
+        self.samp_on = on || reveal;
+        self.samp_ts = ts.clamp(ts_lo / 4.0, ts_hi * 4.0);
+        self.samp_auto_n = auto_n;
+        self.samp_n = n;
+
         // ---- Window and range ----
         let mut auto_window = self.auto_window;
         let mut win = self.window;
@@ -615,7 +780,9 @@ impl SpectrumWorkspace {
         let mut fit = false;
         ui.horizontal(|ui| {
             overlay_frame(t).inner_margin(egui::Margin::same(5)).show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // Wraps onto a second row in a narrow window.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.y = 5.0;
                     let mag = format!("|F({w})|, arg F");
                     let reim = format!("Re F({w}), Im F");
                     segmented(ui, &mut self.view, &[(View::MagPhase, &mag, tr("Magnitude and phase", "幅度与相位")), (View::ReIm, &reim, tr("Real and imaginary parts", "实部与虚部"))]);
@@ -627,6 +794,7 @@ impl SpectrumWorkspace {
                     chip(ui, &mut self.show_t0, "t₀", Some(C_T0)).on_hover_text(tr("Time marker (click the f(t) plot)", "时间标记（单击 f(t) 图）"));
                     chip(ui, &mut self.show_w0, &format!("{w}₀"), Some(C_W0)).on_hover_text(tr("Frequency marker (click a spectrum)", "频率标记（单击频谱图）"));
                     chip(ui, &mut self.recon_on, tr("Reconstruction", "带限重建"), Some(C_RECON)).on_hover_text(tr("Band-limited f_Ω(t)", "带限信号 f_Ω(t)"));
+                    chip(ui, &mut self.samp_on, tr("Sampling", "采样"), Some(C_SAMP)).on_hover_text(tr("Samples of f, their periodic spectrum and the DFT", "f 的采样点、采样后的周期频谱与 DFT"));
                     if ui.button(with_icon(icon::RULER, "")).on_hover_text(tr("Fit the open plots into the window", "让展开的图适应窗口高度")).clicked() {
                         fit = true;
                     }
@@ -783,6 +951,15 @@ impl SpectrumWorkspace {
         } else {
             bottom_segs.push(band.iter().map(|(om, v)| [x_of(*om), v.im]).collect());
         }
+        // Sampled signal: stems in time, the periodic spectrum and DFT bins.
+        let samp = self.samp.as_ref().filter(|_| self.samp_on);
+        let samp_t: Vec<[f64; 2]> = samp.map(|s| s.t.iter().zip(&s.x).map(|(tt, v)| [*tt, v.re]).collect()).unwrap_or_default();
+        let samp_top: Vec<[f64; 2]> = samp.map(|s| s.dtft.iter().map(|(om, v)| [x_of(*om), top_q(clean(*v))]).collect()).unwrap_or_default();
+        let samp_bot: Vec<[f64; 2]> = samp.filter(|_| view == View::ReIm).map(|s| s.dtft.iter().map(|(om, v)| [x_of(*om), clean(*v).im]).collect()).unwrap_or_default();
+        let bins_top: Vec<[f64; 2]> = samp.map(|s| s.bins.iter().map(|(om, v)| [x_of(*om), top_q(clean(*v))]).collect()).unwrap_or_default();
+        let bins_bot: Vec<[f64; 2]> = samp.map(|s| s.bins.iter().filter(|(_, v)| view == View::ReIm || v.norm() > 1e-6 * max_mag).map(|(om, v)| [x_of(*om), bot_q(clean(*v))]).collect()).unwrap_or_default();
+        let nyq = samp.map(|s| x_of(std::f64::consts::PI / s.ts));
+        let samp_name = format!("Tₛ·X({w})");
         let top_name = match (view, db) {
             (View::MagPhase, false) => format!("|F({w})|"),
             (View::MagPhase, true) => format!("20 log₁₀|F({w})|"),
@@ -814,6 +991,10 @@ impl SpectrumWorkspace {
                         }
                         if !rc_t.is_empty() {
                             pui.line(Line::new("f_Ω(t)", PlotPoints::from(rc_t.clone())).color(C_RECON).width(1.6));
+                        }
+                        if !samp_t.is_empty() {
+                            let p = egui_plot::Points::new("f(nTₛ)", samp_t.clone()).radius(if samp_t.len() <= 400 { 3.0 } else { 1.6 }).color(C_SAMP);
+                            pui.points(if samp_t.len() <= 400 { p.stems(0.0) } else { p });
                         }
                         let hovered = pui.response().hovered();
                         let coord = pui.pointer_coordinate();
@@ -891,12 +1072,28 @@ impl SpectrumWorkspace {
                         if let Some(rr) = rw {
                             pui.span(Span::new(format!("|{w}| ≤ Ω"), -rr..=rr).fill(C_RECON.gamma_multiply(0.08)).border_color(C_RECON.gamma_multiply(0.5)).border_width(1.0));
                         }
+                        // The sampled spectrum goes underneath: where it agrees
+                        // with F it shows as a halo, where it aliases it parts.
+                        let (s_line, s_bins) = if is_top { (&samp_top, &bins_top) } else { (&samp_bot, &bins_bot) };
+                        if !s_line.is_empty() {
+                            pui.line(Line::new(samp_name.clone(), PlotPoints::from(s_line.clone())).color(C_SAMP.gamma_multiply(0.75)).width(4.0));
+                        }
+                        if let Some(nq) = nyq {
+                            for x in [-nq, nq] {
+                                pui.vline(VLine::new("", x).color(C_SAMP.gamma_multiply(0.8)).width(1.0).style(LineStyle::dashed_loose()).allow_hover(false));
+                            }
+                        }
                         if is_top {
                             pui.line(Line::new(name.clone(), PlotPoints::from(top.clone())).color(C_RE).width(2.0));
                         } else {
                             for seg in &bottom_segs {
                                 pui.line(Line::new(name.clone(), PlotPoints::from(seg.clone())).color(C_IM).width(1.8));
                             }
+                        }
+                        if !s_bins.is_empty() {
+                            let stems = s_bins.len() <= 400 && if is_top { !(view == View::MagPhase && db) } else { view == View::ReIm };
+                            let p = egui_plot::Points::new("X[k]", s_bins.clone()).radius(3.0).color(C_SAMP);
+                            pui.points(if stems { p.stems(0.0) } else { p });
                         }
                         let q = |v: C64| if is_top { top_q(v) } else { bot_q(v) };
                         let mark = |pui: &mut egui_plot::PlotUi, om: f64, color: Color32, dashed: bool| {

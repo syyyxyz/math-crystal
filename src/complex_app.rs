@@ -58,6 +58,7 @@ enum Shade {
 pub struct ComplexWorkspace {
     src: String,
     func: Option<CFunc>,
+    params: crate::ui::params::Params,
     error: Option<String>,
     mode: Mode,
     plane: Plane,
@@ -166,6 +167,7 @@ impl ComplexWorkspace {
         let mut s = Self {
             src: src.to_string(),
             func: None,
+            params: Default::default(),
             error: None,
             mode: Mode::Colour,
             plane: Plane::new(c(0.0, 0.0), 3.0),
@@ -224,7 +226,9 @@ impl ComplexWorkspace {
 
     fn recompile(&mut self) {
         match CFunc::new(self.src.trim()) {
-            Ok(f) => {
+            Ok(mut f) => {
+                self.params.sync(&f.params);
+                f.set_params(&self.params.values());
                 self.func = Some(f);
                 self.error = None;
             }
@@ -365,7 +369,7 @@ impl ComplexWorkspace {
                     egui::Frame::new().fill(t.input).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         egui::ScrollArea::horizontal().id_salt("cf_preview").show(ui, |ui| {
-                            if !mathview::show(ui, pool, id, &crate::complex::VARS, "w", 17.0, t.text) {
+                            if !mathview::show(ui, pool, id, &f.names(), "w", 17.0, t.text) {
                                 ui.label(RichText::new(f.text(0)).monospace().size(12.5));
                             }
                         });
@@ -393,6 +397,16 @@ impl ComplexWorkspace {
         );
         if let Some(f) = pick {
             self.set_function(f);
+        }
+        let ch = self.params.ui(ui, "complex_params");
+        if ch.changed
+            && let Some(f) = &mut self.func
+        {
+            f.set_params(&self.params.values());
+            // Everything cached per function is stale now.
+            for key in [&mut self.spec_key, &mut self.contour_key, &mut self.relief_key, &mut self.map_key, &mut self.tex_key] {
+                key.clear();
+            }
         }
 
         // ---- z0 ----
@@ -744,7 +758,7 @@ impl ComplexWorkspace {
                 egui::Frame::new().fill(t.input).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::horizontal().id_salt("cf_deriv").show(ui, |ui| {
-                        if !mathview::show(ui, pool, id, &crate::complex::VARS, "f'", 15.0, t.text) {
+                        if !mathview::show(ui, pool, id, &f.names(), "f'", 15.0, t.text) {
                             ui.add(egui::Label::new(RichText::new(f.text(1)).monospace().size(12.5)).wrap());
                         }
                     });

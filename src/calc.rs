@@ -1,7 +1,7 @@
 //! Two-variable calculus: compiled f(x, y) with exact symbolic partials,
 //! robust point derivatives and grid sampling.
 
-use crate::expr::{Id, Pool, Program, Vars, parse};
+use crate::expr::{Id, Pool, Program, Vars, parse_with_params};
 
 pub const VARS: [&str; 2] = ["x", "y"];
 
@@ -22,6 +22,9 @@ pub struct Surface {
     prog: Program,
     /// Only f, for fast grid sampling.
     f_prog: Program,
+    /// Names of the parameters in f (letters other than x and y), in
+    /// order of first use; their values start at 1.
+    pub params: Vec<String>,
 }
 
 /// Where a derivative value came from.
@@ -86,7 +89,8 @@ impl Surface {
     pub fn new(source: &str) -> Result<Self, crate::expr::ParseError> {
         let mut pool = Pool::new();
         let vars = Vars(VARS.to_vec());
-        let f = parse(source, &mut pool, &vars, false)?;
+        let mut params = Vec::new();
+        let f = parse_with_params(source, &mut pool, &vars, false, &mut params)?;
         let fx = pool.diff(f, 0);
         let fy = pool.diff(f, 1);
         let fxx = pool.diff(fx, 0);
@@ -96,13 +100,27 @@ impl Surface {
         let ids = [f, fx, fy, fxx, fyy, fxy, fyx];
         let prog = Program::compile(&pool, &ids);
         let f_prog = Program::compile(&pool, &[f]);
-        Ok(Self {
+        let mut s = Self {
             source: source.to_string(),
             pool,
             ids,
             prog,
             f_prog,
-        })
+            params,
+        };
+        s.set_params(&vec![1.0; s.params.len()]);
+        Ok(s)
+    }
+
+    /// Give the parameters their values (same order as [`Self::params`]).
+    pub fn set_params(&mut self, values: &[f64]) {
+        self.prog.set_params(values);
+        self.f_prog.set_params(values);
+    }
+
+    /// Variable names followed by the parameter names.
+    pub fn names(&self) -> Vec<&str> {
+        VARS.iter().copied().chain(self.params.iter().map(String::as_str)).collect()
     }
 
     pub fn f(&self, x: f64, y: f64) -> f64 {
@@ -112,12 +130,12 @@ impl Surface {
     /// Text of a symbolic derivative: 1 = f_x, 2 = f_y, 3 = f_xx, 4 = f_yy,
     /// 5 = f_xy, 6 = f_yx.
     pub fn formula(&self, which: usize) -> String {
-        self.pool.to_string(self.ids[which], &VARS)
+        self.pool.to_string(self.ids[which], &self.names())
     }
 
     /// LaTeX of f (0) or a derivative (1..=6, as in [`Self::formula`]).
     pub fn formula_latex(&self, which: usize) -> String {
-        self.pool.to_latex(self.ids[which], &VARS)
+        self.pool.to_latex(self.ids[which], &self.names())
     }
 
     /// The expression pool and the id of f (0) or a derivative (1..=6).

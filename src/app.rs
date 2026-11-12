@@ -15,6 +15,7 @@ use crate::ui::export::{self, Export};
 use crate::ui::theme::{self, Tokens, icon, tokens, with_icon};
 use crate::i18n::{self, tr};
 use crate::ui::mathview;
+use crate::ui::params::Params;
 use crate::ui::widgets::{badge, caption, card, eye, layer_bar, overlay_frame, segmented};
 
 /// Resolution of the region indicator grid used for outlines.
@@ -102,6 +103,10 @@ impl MathCrystal {
         self.workspace = Workspace::Complex;
     }
 
+    pub fn spectrum_mut(&mut self) -> &mut crate::spectrum_app::SpectrumWorkspace {
+        &mut self.spectrum
+    }
+
     pub fn calc_mut(&mut self) -> &mut CalcWorkspace {
         &mut self.calc
     }
@@ -186,6 +191,7 @@ impl MathCrystal {
                     row(ui, "if(c, a, b)", tr("Piecewise: a where c holds, else b", "分段：满足 c 时取 a，否则取 b"));
                     row(ui, "< <= == != and or", tr("Comparisons; chains like 0 < x < 1", "比较运算；可连写 0 < x < 1"));
                     row(ui, "pi  e  tau", tr("Constants", "常数"));
+                    row(ui, "a  k  T  ω", tr("Other letters are parameters with sliders", "其他字母是参数，会出现滑块"));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(tr("Complex functions", "复变函数")).strong());
@@ -201,6 +207,7 @@ impl MathCrystal {
                     row(ui, "t  rect  tri  step  sinc", tr("Variable t and handy pulses", "变量 t 与常用脉冲"));
                     row(ui, tr("Drag, scroll", "拖动、滚轮"), tr("Pan, zoom along the axis; double-click resets", "平移、沿横轴缩放；双击重置"));
                     row(ui, tr("Click a spectrum", "单击频谱"), tr("Set ω₀ and read F(ω₀)", "设置 ω₀ 并读出 F(ω₀)"));
+                    row(ui, tr("Sampling", "采样"), tr("Samples, the aliased periodic spectrum and N-point DFT", "采样点、混叠后的周期频谱与 N 点 DFT"));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(tr("LaTeX input", "LaTeX 输入")).strong());
@@ -254,6 +261,7 @@ impl eframe::App for MathCrystal {
 pub struct CalcWorkspace {
     src: String,
     surface: Option<Surface>,
+    params: Params,
     error: Option<String>,
     settings: Settings,
     z_auto: bool,
@@ -284,6 +292,10 @@ pub struct CalcWorkspace {
     integral: Option<Integral>,
     int_key: Option<(String, (f64, f64), (f64, f64), String, bool)>,
     int_ms: f64,
+    /// Midpoint Riemann sum, and the slice area with the volume swept so far.
+    riemann_sum: Option<f64>,
+    slice_vals: Option<(f64, f64)>,
+    viz_key: Option<(String, (f64, f64), (f64, f64), String, bool, bool, usize, bool, bool, u64)>,
     analysis_version: u64,
     /// Plain clicks on the canvas place P.
     pick_mode: bool,
@@ -296,6 +308,7 @@ impl CalcWorkspace {
         let mut s = Self {
             src: src.to_string(),
             surface: None,
+            params: Params::default(),
             error: None,
             settings: Settings::default(),
             z_auto: true,
@@ -323,6 +336,9 @@ impl CalcWorkspace {
             integral: None,
             int_key: None,
             int_ms: 0.0,
+            riemann_sum: None,
+            slice_vals: None,
+            viz_key: None,
             analysis_version: 0,
             pick_mode: false,
             layers_open: false,
@@ -350,7 +366,9 @@ impl CalcWorkspace {
 
     fn recompile(&mut self) {
         match Surface::new(self.src.trim()) {
-            Ok(surf) => {
+            Ok(mut surf) => {
+                self.params.sync(&surf.params);
+                surf.set_params(&self.params.values());
                 self.surface = Some(surf);
                 self.error = None;
             }
@@ -363,12 +381,36 @@ impl CalcWorkspace {
         if !self.z_auto {
             return;
         }
-        if let Some(surf) = &self.surface {
-            let s = &self.settings;
-            let z = surf.sample(s.xr, s.yr, 65);
+        if let Some(surf) = &mut self.surface {
+            let (xr, yr) = (self.settings.xr, self.settings.yr);
+            let mut z = surf.sample(xr, yr, 65);
+            // A playing parameter: fit the whole sweep so the box holds still.
+            let base = self.params.values();
+            for (k, p) in self.params.items.iter().enumerate().filter(|(_, p)| p.playing) {
+                for q in 0..=4 {
+                    let mut v = base.clone();
+                    v[k] = p.lo + (p.hi - p.lo) * q as f64 / 4.0;
+                    surf.set_params(&v);
+                    z.extend(surf.sample(xr, yr, 33));
+                }
+            }
+            surf.set_params(&base);
             if let Some(zr) = calc_view::auto_z(&z) {
                 self.settings.zr = zr;
             }
+        }
+    }
+
+    /// New parameter values: re-evaluate everything derived from f.
+    fn apply_params(&mut self, settled: bool) {
+        let Some(surf) = &mut self.surface else { return };
+        surf.set_params(&self.params.values());
+        self.crit_key = None;
+        self.int_key = None;
+        self.built_for = None;
+        self.model_synced_for = None;
+        if settled {
+            self.update_auto_z();
         }
     }
 
@@ -422,8 +464,22 @@ impl CalcWorkspace {
                 Some(analysis::integrate(surf, s.xr, s.yr, self.region.as_ref()))
             };
             self.int_ms = t0.elapsed().as_secs_f64() * 1e3;
-            self.int_key = Some(ik);
+            self.int_key = Some(ik.clone());
+            self.viz_key = None;
             self.analysis_version += 1;
+        }
+        let vk = (ik.0, ik.1, ik.2, ik.3, ik.4, s.show_riemann, s.riemann_n, s.show_slice, s.slice_x, s.slice_t.to_bits());
+        if self.viz_key.as_ref() != Some(&vk) {
+            let usable = !self.use_region || self.region.is_some();
+            let region = self.region.as_ref();
+            self.riemann_sum = (s.show_riemann && usable).then(|| analysis::riemann(surf, s.xr, s.yr, region, s.riemann_n).0);
+            self.slice_vals = (s.show_slice && usable).then(|| {
+                let (c, range) = s.slice();
+                let area = analysis::slice_integral(surf, s.slice_x, c, range, region);
+                let (xr, yr) = if s.slice_x { ((s.xr.0, c), s.yr) } else { (s.xr, (s.yr.0, c)) };
+                (area, analysis::integrate(surf, xr, yr, region).value)
+            });
+            self.viz_key = Some(vk);
         }
     }
 
@@ -442,6 +498,9 @@ impl CalcWorkspace {
         if let Some(surf) = &self.surface {
             let region = (!self.region_grid.is_empty()).then_some((&self.region_grid[..], REGION_N));
             calc_view::analysis_layers(surf, &self.settings, &b.frame, &self.criticals, region, &mut b.scene);
+            if !self.use_region || self.region.is_some() {
+                calc_view::integral_layers(surf, &self.settings, &b.frame, self.region.as_ref(), &mut b.scene);
+            }
         }
         self.build_ms = t0.elapsed().as_secs_f64() * 1e3;
         self.scene = b.scene;
@@ -537,7 +596,7 @@ impl CalcWorkspace {
                     egui::Frame::new().fill(t.input).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         egui::ScrollArea::horizontal().id_salt("f_preview").show(ui, |ui| {
-                            if !mathview::show(ui, pool, id, &crate::calc::VARS, "z", 17.0, t.text) {
+                            if !mathview::show(ui, pool, id, &surf.names(), "z", 17.0, t.text) {
                                 ui.label(RichText::new(surf.formula(0)).monospace().size(12.5));
                             }
                         });
@@ -558,6 +617,10 @@ impl CalcWorkspace {
         );
         if let Some(f) = examples_pick {
             self.set_function(f);
+        }
+        let ch = self.params.ui(ui, "calc_params");
+        if ch.changed || ch.settled {
+            self.apply_params(ch.settled);
         }
 
         // ---- Point ---------------------------------------------------
@@ -726,6 +789,7 @@ impl CalcWorkspace {
         let region_error = self.region_error.clone();
         let integral = self.integral;
         let int_ms = self.int_ms;
+        let (riemann_sum, slice_vals) = (self.riemann_sum, self.slice_vals);
         card(
             ui,
             "integral",
@@ -777,6 +841,53 @@ impl CalcWorkspace {
                         ui.label(RichText::new(with_icon(icon::ALERT, &msg)).size(12.5).color(t.warn));
                     }
                     caption(ui, &format!("{}, {int_ms:.0} ms.", tr("Composite Gauss–Legendre", "复合 Gauss–Legendre 求积")));
+                }
+                // ---- Pictures of the integral ----
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut s.show_riemann, tr("Riemann columns", "黎曼柱体"));
+                    ui.add_enabled(s.show_riemann, egui::Slider::new(&mut s.riemann_n, 2..=60).prefix("n = "));
+                });
+                if let (true, Some(sum), Some(r)) = (s.show_riemann, riemann_sum, integral) {
+                    let n = s.riemann_n;
+                    kv(ui, &t, tr("Riemann sum", "黎曼和"), &format!("{n}×{n} {}", tr("midpoints", "个中点")), &fmt_val(sum));
+                    kv(ui, &t, tr("sum − integral", "与积分之差"), "", &fmt_sci(sum - r.value));
+                    caption(ui, tr("Each column has height f(midpoint) and base ΔA. With more columns the sum approaches ∬ f dA.", "每根柱子高为 f(中点)、底面积为 ΔA。柱子越多，总和越接近 ∬ f dA。"));
+                }
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut s.show_slice, tr("Slice", "切片"));
+                    segmented(
+                        ui,
+                        &mut s.slice_x,
+                        &[
+                            (true, "x = x₀", tr("Integrate over y first, then over x", "先对 y 积分，再对 x 积分")),
+                            (false, "y = y₀", tr("Integrate over x first, then over y", "先对 x 积分，再对 y 积分")),
+                        ],
+                    );
+                });
+                if s.show_slice {
+                    let (lo, hi) = if s.slice_x { s.xr } else { s.yr };
+                    let (v, w) = if s.slice_x { ("x", "y") } else { ("y", "x") };
+                    let mut c = crate::calc::lerp((lo, hi), s.slice_t);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{v}₀")).monospace().color(t.muted));
+                        if ui.add(egui::Slider::new(&mut c, lo..=hi).max_decimals(3)).changed() {
+                            s.slice_t = ((c - lo) / (hi - lo)).clamp(0.0, 1.0);
+                        }
+                    });
+                    if let Some((area, swept)) = slice_vals {
+                        let inner = if s.slice_x { "= ∫ f(x₀, y) dy" } else { "= ∫ f(x, y₀) dx" };
+                        kv(ui, &t, &format!("A({v}₀)"), inner, &fmt_val(area));
+                        let share = integral.filter(|r| r.value.abs() > 1e-12).map(|r| format!("  ({}%)", fmt_short(swept / r.value * 100.0))).unwrap_or_default();
+                        kv(ui, &t, &format!("∫ A d{v}"), &format!("{} {v}₀", tr("up to", "积到")), &format!("{}{share}", fmt_val(swept)));
+                    }
+                    let msg = if i18n::zh() {
+                        format!("切片的面积是 A({v}₀)。让切片扫过整个定义域，面积累加起来就是体积：∬ f dA = ∫ A({v}) d{v}，其中 A({v}) = ∫ f d{w}。")
+                    } else {
+                        format!("The slice has area A({v}₀). Sweeping it across the domain adds the areas up to the volume: ∬ f dA = ∫ A({v}) d{v}, with A({v}) = ∫ f d{w}.")
+                    };
+                    caption(ui, &msg);
                 }
             },
         );
@@ -909,7 +1020,7 @@ impl CalcWorkspace {
                 egui::Frame::new().fill(t.input).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::horizontal().id_salt(("formula", k)).show(ui, |ui| {
-                        if !mathview::show(ui, pool, id, &crate::calc::VARS, "", 15.0, t.text) {
+                        if !mathview::show(ui, pool, id, &surf.names(), "", 15.0, t.text) {
                             let text = surf.formula(k);
                             let shown = if text.chars().count() > 600 { format!("{}…", text.chars().take(600).collect::<String>()) } else { text };
                             ui.add(egui::Label::new(RichText::new(shown).monospace().size(12.5)).wrap());

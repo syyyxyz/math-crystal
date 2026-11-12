@@ -15,7 +15,7 @@ pub mod parse;
 use std::collections::HashMap;
 
 pub use eval::Program;
-pub use parse::{ParseError, parse};
+pub use parse::{ParseError, parse, parse_with_params};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct Id(pub u32);
@@ -99,6 +99,9 @@ pub struct Pool {
     nodes: Vec<Node>,
     map: HashMap<Node, Id>,
     diff_memo: HashMap<(Id, u8), Id>,
+    /// Variables from this index on are parameters (written before the
+    /// variables in products: `a*x`, not `x*a`).
+    first_param: Option<u8>,
 }
 
 impl Pool {
@@ -292,10 +295,13 @@ impl Pool {
     /// order: variables (x before y), then powers of variables, then
     /// functions, then everything else; ties by id.
     fn order_key(&self, id: Id) -> (u8, u8, Id) {
+        let is_param = |v: u8| self.first_param.is_some_and(|p| v >= p);
         match self.node(id) {
+            Node::Var(v) if is_param(v) => (0, v, id),
             Node::Var(v) => (1, v, id),
             Node::I => (1, 255, id),
             Node::Bin(Bin::Pow, b, _) => match self.node(b) {
+                Node::Var(v) if is_param(v) => (0, v, id),
                 Node::Var(v) => (2, v, id),
                 _ => (4, 0, id),
             },
@@ -353,10 +359,12 @@ impl Pool {
                     return self.num(v);
                 }
             }
-            // (u^p)^q -> u^(p*q) is only safe for integer q.
+            // (u^p)^q -> u^(p*q) is only safe when both are integers:
+            // (x^0.5)^2 -> x would drop the x >= 0 domain.
             if e.fract() == 0.0
                 && let Node::Bin(Bin::Pow, u, p) = self.node(a)
                 && let Some(p) = self.as_const(p)
+                && p.fract() == 0.0
             {
                 let k = self.num(p * e);
                 return self.pow(u, k);

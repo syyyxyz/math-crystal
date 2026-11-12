@@ -36,6 +36,26 @@ fn main() {
     if spectrum {
         h.state_mut().show_spectrum();
     }
+    // `--fn <expr>` sets the function of the shown workspace.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(f) = args.iter().position(|a| a == "--fn").and_then(|k| args.get(k + 1)) {
+        if complex {
+            h.state_mut().complex_mut().set_function(f);
+        } else if spectrum {
+            h.state_mut().spectrum_mut().set_function(f);
+        } else {
+            h.state_mut().calc_mut().set_function(f);
+        }
+    }
+    if std::env::args().any(|a| a == "--integral") {
+        let s = h.state_mut().calc_mut().settings_mut();
+        s.show_riemann = true;
+        s.show_slice = true;
+        s.slice_t = 0.7;
+    }
+    if std::env::args().any(|a| a == "--sampling") {
+        h.state_mut().spectrum_mut().show_sampling();
+    }
     h.run_steps(4);
     let img = h.render().expect("render");
     let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }).replace("ui", if complex { "complex" } else if spectrum { "spectrum" } else { "ui" }));

@@ -11,7 +11,7 @@
 
 use num_complex::Complex64 as C64;
 
-use crate::expr::{Bin, Id, Node, Pool, Program, Un, Vars, parse};
+use crate::expr::{Bin, Id, Node, Pool, Program, Un, Vars, parse_with_params};
 
 pub const VARS: [&str; 3] = ["z", "x", "y"];
 const TAU: f64 = std::f64::consts::TAU;
@@ -136,13 +136,16 @@ pub struct CFunc {
     pub holomorphic: bool,
     /// Why f is not holomorphic: the operation that breaks it, if any.
     pub reason: Option<&'static str>,
+    /// Parameter names (letters other than z, x, y, i), values start at 1.
+    pub params: Vec<String>,
 }
 
 impl CFunc {
     pub fn new(source: &str) -> Result<Self, crate::expr::ParseError> {
         let mut pool = Pool::new();
         let vars = Vars(VARS.to_vec());
-        let f = parse(source, &mut pool, &vars, true)?;
+        let mut params = Vec::new();
+        let f = parse_with_params(source, &mut pool, &vars, true, &mut params)?;
         let prog = Program::compile(&pool, &[f]);
         let reason = nonholomorphic_op(&pool, f);
         let (mut dprog, mut dxprog, mut dyprog, mut df) = (None, None, None, f);
@@ -163,9 +166,23 @@ impl CFunc {
             dxprog = Some(Program::compile(&pool, &[dx]));
             dyprog = Some(Program::compile(&pool, &[dy]));
         }
-        let mut cf = Self { source: source.to_string(), pool, f, df, prog, dprog, dxprog, dyprog, holomorphic: false, reason };
-        cf.holomorphic = cf.check_holomorphic();
+        let mut cf = Self { source: source.to_string(), pool, f, df, prog, dprog, dxprog, dyprog, holomorphic: false, reason, params };
+        cf.set_params(&vec![1.0; cf.params.len()]);
         Ok(cf)
+    }
+
+    /// Give the parameters their values (same order as [`Self::params`]).
+    pub fn set_params(&mut self, values: &[f64]) {
+        self.prog.set_params(values);
+        for p in [&mut self.dprog, &mut self.dxprog, &mut self.dyprog].into_iter().flatten() {
+            p.set_params(values);
+        }
+        self.holomorphic = self.check_holomorphic();
+    }
+
+    /// Variable names followed by the parameter names.
+    pub fn names(&self) -> Vec<&str> {
+        VARS.iter().copied().chain(self.params.iter().map(String::as_str)).collect()
     }
 
     fn check_holomorphic(&self) -> bool {
@@ -219,11 +236,11 @@ impl CFunc {
     }
 
     pub fn latex(&self, which: usize) -> String {
-        self.pool.to_latex(if which == 0 { self.f } else { self.df }, &VARS)
+        self.pool.to_latex(if which == 0 { self.f } else { self.df }, &self.names())
     }
 
     pub fn text(&self, which: usize) -> String {
-        self.pool.to_string(if which == 0 { self.f } else { self.df }, &VARS)
+        self.pool.to_string(if which == 0 { self.f } else { self.df }, &self.names())
     }
 
     /// Evaluate at many points at once.
