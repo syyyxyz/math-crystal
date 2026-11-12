@@ -11,3 +11,5 @@ pub mod map_view;
 pub mod complex;
 pub mod complex_view;
 pub mod complex_app;
+pub mod spectrum;
+pub mod spectrum_app;

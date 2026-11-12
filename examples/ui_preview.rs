@@ -32,9 +32,13 @@ fn main() {
     if complex {
         h.state_mut().show_complex();
     }
+    let spectrum = std::env::args().any(|a| a == "--spectrum");
+    if spectrum {
+        h.state_mut().show_spectrum();
+    }
     h.run_steps(4);
     let img = h.render().expect("render");
-    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }).replace("ui", if complex { "complex" } else { "ui" }));
+    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }).replace("ui", if complex { "complex" } else if spectrum { "spectrum" } else { "ui" }));
     img.save(&path).unwrap();
     eprintln!("wrote {}", path.display());
 }

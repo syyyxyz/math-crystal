@@ -55,6 +55,7 @@ pub struct MathCrystal {
     workspace: Workspace,
     calc: CalcWorkspace,
     complex: crate::complex_app::ComplexWorkspace,
+    spectrum: crate::spectrum_app::SpectrumWorkspace,
     logo: Option<egui::TextureHandle>,
     show_help: bool,
 }
@@ -81,6 +82,7 @@ impl MathCrystal {
             workspace: Workspace::Calculus,
             calc: CalcWorkspace::new(DEFAULT_FUNCTION),
             complex: crate::complex_app::ComplexWorkspace::default(),
+            spectrum: crate::spectrum_app::SpectrumWorkspace::default(),
             logo: Some(logo),
             show_help: false,
         }
@@ -88,6 +90,11 @@ impl MathCrystal {
 
     pub fn complex_mut(&mut self) -> &mut crate::complex_app::ComplexWorkspace {
         &mut self.complex
+    }
+
+    /// Show the Spectrum workspace (used by the preview example).
+    pub fn show_spectrum(&mut self) {
+        self.workspace = Workspace::Spectrum;
     }
 
     /// Show the Complex workspace (used by the preview example).
@@ -121,7 +128,7 @@ impl MathCrystal {
                         &[
                             (Workspace::Calculus, &with_icon(icon::FUNCTION, tr("Calculus", "多元微积分")), tr("Functions of two variables", "二元函数")),
                             (Workspace::Complex, &with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions w = f(z)", "复变函数 w = f(z)")),
-                            (Workspace::Spectrum, &with_icon(icon::SINE, tr("Spectrum", "频谱")), tr("Fourier spectra (coming next)", "傅里叶频谱（即将推出）")),
+                            (Workspace::Spectrum, &with_icon(icon::SINE, tr("Spectrum", "频谱")), tr("Fourier transform of an absolutely integrable f(t)", "绝对可积信号 f(t) 的傅里叶变换")),
                         ],
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -139,6 +146,7 @@ impl MathCrystal {
                             // Error messages come from the parser: re-run it.
                             self.calc.relocalize();
                             self.complex.relocalize();
+                            self.spectrum.relocalize();
                         }
                     });
                 });
@@ -188,6 +196,13 @@ impl MathCrystal {
                     row(ui, tr("Right-drag, scroll", "右键拖动、滚轮"), tr("Pan and zoom the plane; double-click resets", "平移、缩放平面；双击重置"));
                 });
                 ui.add_space(8.0);
+                ui.label(RichText::new(tr("Spectrum", "频谱")).strong());
+                egui::Grid::new("help_spectrum").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    row(ui, "t  rect  tri  step  sinc", tr("Variable t and handy pulses", "变量 t 与常用脉冲"));
+                    row(ui, tr("Drag, scroll", "拖动、滚轮"), tr("Pan, zoom along the axis; double-click resets", "平移、沿横轴缩放；双击重置"));
+                    row(ui, tr("Click a spectrum", "单击频谱"), tr("Set ω₀ and read F(ω₀)", "设置 ω₀ 并读出 F(ω₀)"));
+                });
+                ui.add_space(8.0);
                 ui.label(RichText::new(tr("LaTeX input", "LaTeX 输入")).strong());
                 egui::Grid::new("help_latex").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                     row(ui, "\\frac{a}{b}  \\sqrt{x}  \\sqrt[3]{x}", tr("Fractions and roots", "分式与根式"));
@@ -229,31 +244,12 @@ impl eframe::App for MathCrystal {
         match self.workspace {
             Workspace::Calculus => self.calc.ui(ui, frame),
             Workspace::Complex => self.complex.ui(ui, frame),
-            Workspace::Spectrum => coming_soon(ui, false),
+            Workspace::Spectrum => self.spectrum.ui(ui, frame),
         }
         self.help_window(&ctx);
     }
 }
 
-fn coming_soon(ui: &mut Ui, complex: bool) {
-    let t = tokens(ui.ctx());
-    egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(t.window))
-        .show(ui, |ui| {
-            ui.centered_and_justified(|ui| {
-                let (ic, title, body) = if complex {
-                    (icon::TARGET, tr("Complex functions", "复变函数"), tr("Domain colouring, conformal grids and |f(z)| relief are planned for phase 3.", "定义域着色、保角网格和 |f(z)| 曲面计划在第三阶段完成。"))
-                } else {
-                    (icon::SINE, tr("Fourier spectrum", "傅里叶频谱"), tr("Spectra of absolutely integrable signals are planned for phase 4.", "绝对可积信号的频谱计划在第四阶段完成。"))
-                };
-                ui.label(
-                    RichText::new(format!("{}\n\n{body}", with_icon(ic, title)))
-                        .size(16.0)
-                        .color(t.muted),
-                );
-            });
-        });
-}
 
 pub struct CalcWorkspace {
     src: String,
