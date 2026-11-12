@@ -28,9 +28,13 @@ fn main() {
         s.show_grid = true;
         s.show_model = false;
     }
+    let complex = std::env::args().any(|a| a == "--complex");
+    if complex {
+        h.state_mut().show_complex();
+    }
     h.run_steps(4);
     let img = h.render().expect("render");
-    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }));
+    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }).replace("ui", if complex { "complex" } else { "ui" }));
     img.save(&path).unwrap();
     eprintln!("wrote {}", path.display());
 }

@@ -182,3 +182,46 @@ pub fn caption(ui: &mut Ui, text: &str) {
 pub fn text_at(ui: &Ui, pos: egui::Pos2, text: &str, size: f32, color: Color32) {
     ui.painter().text(pos, Align2::CENTER_CENTER, text, FontId::proportional(size), color);
 }
+
+/// One toggle in a [`layer_bar`]: value, full label, short label, swatch, tooltip.
+pub type LayerChip<'a> = (&'a mut bool, &'a str, &'a str, Option<Color32>, &'a str);
+
+/// Layer toggles centred at the bottom of `inner`. Folded into a single
+/// "Layers" chip (showing how many are on) unless `open`; unfolded, the
+/// labels shorten when the row would not fit.
+pub fn layer_bar(ui: &mut Ui, inner: egui::Rect, open: &mut bool, chips: Vec<LayerChip>) {
+    use super::theme::{icon, with_icon};
+    use crate::i18n::tr;
+    let t = tokens(ui.ctx());
+    let active = chips.iter().filter(|c| *c.0).count();
+    let toggle_label = if *open {
+        with_icon(icon::CHEVRON_DOWN, tr("Layers", "图层"))
+    } else if active > 0 {
+        format!("{}  {active}", with_icon(icon::LAYERS, tr("Layers", "图层")))
+    } else {
+        with_icon(icon::LAYERS, tr("Layers", "图层"))
+    };
+    let measure = |ui: &Ui, text: &str, sw: bool| ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), Color32::WHITE).size().x + 22.0 + if sw { 14.0 } else { 0.0 };
+    let toggle_w = measure(ui, &toggle_label, false) + 6.0;
+    let width_of = |short: bool| toggle_w + chips.iter().map(|c| measure(ui, if short { c.2 } else { c.1 }, c.3.is_some()) + 6.0).sum::<f32>() + 10.0;
+    let short = width_of(false) > inner.width() - 8.0;
+    let w = if *open { width_of(short).min(inner.width()) } else { toggle_w + 10.0 };
+    let bottom = egui::Rect::from_center_size(egui::pos2(inner.center().x, inner.max.y - 20.0), Vec2::new(w + 2.0, 40.0));
+    let mut bc = ui.new_child(egui::UiBuilder::new().max_rect(bottom).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    overlay_frame(&t).inner_margin(Margin::symmetric(8, 6)).show(&mut bc, |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let mut shown = *open;
+        chip(ui, &mut shown, &toggle_label, None).on_hover_text(if *open { tr("Hide the layer list", "收起图层列表") } else { tr("Show or hide parts of the drawing", "显示或隐藏图中的元素") });
+        if shown != *open {
+            *open = shown;
+            return;
+        }
+        if !*open {
+            return;
+        }
+        for (v, full, brief, color, tip) in chips {
+            let label = if short { brief } else { full };
+            chip(ui, v, label, color).on_hover_text(if short { format!("{full}: {tip}") } else { tip.to_string() });
+        }
+    });
+}

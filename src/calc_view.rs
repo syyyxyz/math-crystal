@@ -457,7 +457,7 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
 }
 
 /// Camera-dependent box, grid and tick lines plus text labels.
-pub fn decorations(s: &Settings, frame: &Frame3, cam: &Camera, proj: &Projector) -> (Vec<LineInstance>, Vec<Label>) {
+pub fn decorations(s: &Settings, frame: &Frame3, cam: &Camera, proj: &Projector, names: [&str; 3]) -> (Vec<LineInstance>, Vec<Label>) {
     let pal = s.theme.palette();
     let h = frame.half;
     let eye = cam.eye();
@@ -486,9 +486,9 @@ pub fn decorations(s: &Settings, frame: &Frame3, cam: &Camera, proj: &Projector)
     }
 
     let axes = [
-        (0usize, s.xr, "x"),
-        (1usize, s.yr, "y"),
-        (2usize, s.zr, "z"),
+        (0usize, s.xr, names[0]),
+        (1usize, s.yr, names[1]),
+        (2usize, s.zr, names[2]),
     ];
     for (axis, (lo, hi), name) in axes {
         let tv = ticks(lo, hi, 5);

@@ -8,13 +8,14 @@ use glam::{Vec2, Vec3};
 use crate::analysis::{self, Critical, Integral, Region};
 use crate::calc::{PointDerivs, Source, Surface, classify};
 use crate::map_view::{self, MapCache, MapInput};
-use crate::calc_view::{self, Coloring, LabelKind, Settings, Theme};
-use crate::render::gpu::{Gpu3d, View, write_png};
-use crate::render::scene::{Camera, Frame3, Projector, Scene};
+use crate::calc_view::{self, Coloring, Settings, Theme};
+use crate::render::scene::{Frame3, Projector, Scene};
+use crate::ui::canvas3d::{self, View3d};
+use crate::ui::export::{self, Export};
 use crate::ui::theme::{self, Tokens, icon, tokens, with_icon};
 use crate::i18n::{self, tr};
 use crate::ui::mathview;
-use crate::ui::widgets::{badge, caption, card, chip, eye, overlay_frame, segmented};
+use crate::ui::widgets::{badge, caption, card, eye, layer_bar, overlay_frame, segmented};
 
 /// Resolution of the region indicator grid used for outlines.
 const REGION_N: usize = 161;
@@ -44,30 +45,16 @@ enum Workspace {
     Spectrum,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ViewPreset {
-    Iso,
-    Front,
-    Side,
-    Top,
-    Custom,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CanvasMode {
     Surface,
     Map,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Projection {
-    Ortho,
-    Persp,
-}
-
 pub struct MathCrystal {
     workspace: Workspace,
     calc: CalcWorkspace,
+    complex: crate::complex_app::ComplexWorkspace,
     logo: Option<egui::TextureHandle>,
     show_help: bool,
 }
@@ -93,9 +80,19 @@ impl MathCrystal {
         Self {
             workspace: Workspace::Calculus,
             calc: CalcWorkspace::new(DEFAULT_FUNCTION),
+            complex: crate::complex_app::ComplexWorkspace::default(),
             logo: Some(logo),
             show_help: false,
         }
+    }
+
+    pub fn complex_mut(&mut self) -> &mut crate::complex_app::ComplexWorkspace {
+        &mut self.complex
+    }
+
+    /// Show the Complex workspace (used by the preview example).
+    pub fn show_complex(&mut self) {
+        self.workspace = Workspace::Complex;
     }
 
     pub fn calc_mut(&mut self) -> &mut CalcWorkspace {
@@ -123,7 +120,7 @@ impl MathCrystal {
                         &mut self.workspace,
                         &[
                             (Workspace::Calculus, &with_icon(icon::FUNCTION, tr("Calculus", "多元微积分")), tr("Functions of two variables", "二元函数")),
-                            (Workspace::Complex, &with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions (coming next)", "复变函数（即将推出）")),
+                            (Workspace::Complex, &with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions w = f(z)", "复变函数 w = f(z)")),
                             (Workspace::Spectrum, &with_icon(icon::SINE, tr("Spectrum", "频谱")), tr("Fourier spectra (coming next)", "傅里叶频谱（即将推出）")),
                         ],
                     );
@@ -141,6 +138,7 @@ impl MathCrystal {
                             i18n::set_zh(!i18n::zh());
                             // Error messages come from the parser: re-run it.
                             self.calc.relocalize();
+                            self.complex.relocalize();
                         }
                     });
                 });
@@ -182,6 +180,14 @@ impl MathCrystal {
                     row(ui, "pi  e  tau", tr("Constants", "常数"));
                 });
                 ui.add_space(8.0);
+                ui.label(RichText::new(tr("Complex functions", "复变函数")).strong());
+                egui::Grid::new("help_complex").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    row(ui, "z  i  x  y", tr("Variable z, imaginary unit i; x = Re z, y = Im z", "变量 z、虚数单位 i；x = Re z，y = Im z"));
+                    row(ui, "conj  re  im  arg  |z|", tr("Non-holomorphic operations", "非全纯运算"));
+                    row(ui, tr("Click / drag", "单击 / 拖动"), tr("Move z₀ (colouring and z-plane)", "移动 z₀（着色图和 z 平面）"));
+                    row(ui, tr("Right-drag, scroll", "右键拖动、滚轮"), tr("Pan and zoom the plane; double-click resets", "平移、缩放平面；双击重置"));
+                });
+                ui.add_space(8.0);
                 ui.label(RichText::new(tr("LaTeX input", "LaTeX 输入")).strong());
                 egui::Grid::new("help_latex").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                     row(ui, "\\frac{a}{b}  \\sqrt{x}  \\sqrt[3]{x}", tr("Fractions and roots", "分式与根式"));
@@ -196,7 +202,7 @@ impl MathCrystal {
                 let names: Vec<&str> = crate::expr::parse::FUNCTIONS
                     .iter()
                     .map(|f| f.name)
-                    .filter(|n| !matches!(*n, "re" | "im" | "conj" | "arg"))
+                    .filter(|n| !matches!(*n, "re" | "im" | "conj" | "arg" | "arcsin" | "arccos" | "arctan" | "heaviside" | "sgn"))
                     .collect();
                 ui.label(RichText::new(names.join("  ")).monospace().size(12.5).color(t.muted));
             });
@@ -222,7 +228,8 @@ impl eframe::App for MathCrystal {
         let ctx = ui.ctx().clone();
         match self.workspace {
             Workspace::Calculus => self.calc.ui(ui, frame),
-            Workspace::Complex | Workspace::Spectrum => coming_soon(ui, self.workspace == Workspace::Complex),
+            Workspace::Complex => self.complex.ui(ui, frame),
+            Workspace::Spectrum => coming_soon(ui, false),
         }
         self.help_window(&ctx);
     }
@@ -248,24 +255,13 @@ fn coming_soon(ui: &mut Ui, complex: bool) {
         });
 }
 
-/// GPU resources of one 3D canvas.
-struct Canvas {
-    gpu: Gpu3d,
-    texture: Option<egui::TextureId>,
-    /// What was rendered last: skip re-rendering when nothing changed.
-    last: Option<(View, [u32; 2], u64)>,
-    adapter: String,
-}
-
 pub struct CalcWorkspace {
     src: String,
     surface: Option<Surface>,
     error: Option<String>,
     settings: Settings,
     z_auto: bool,
-    camera: Camera,
-    preset: ViewPreset,
-    canvas: Option<Canvas>,
+    view: View3d,
     // Cached build results.
     built_for: Option<(String, Settings, u64)>,
     scene: Scene,
@@ -277,11 +273,7 @@ pub struct CalcWorkspace {
     /// (src, a, b) the model sliders were last synced to.
     model_synced_for: Option<(String, f64, f64)>,
     toast: Option<(String, Instant)>,
-    /// Frames left in an export: overlays are hidden while > 0.
-    export_frames: u8,
-    export_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// A screenshot was requested and has not arrived yet.
-    export_waiting: bool,
+    export: Export,
     mode: CanvasMode,
     map_visited: bool,
     map_cache: MapCache,
@@ -311,9 +303,7 @@ impl CalcWorkspace {
             error: None,
             settings: Settings::default(),
             z_auto: true,
-            camera: Camera::default(),
-            preset: ViewPreset::Iso,
-            canvas: None,
+            view: View3d::default(),
             built_for: None,
             scene: Scene::default(),
             frame: Frame3::new(glam::DVec3::splat(-1.0), glam::DVec3::splat(1.0), false),
@@ -323,9 +313,7 @@ impl CalcWorkspace {
             build_ms: 0.0,
             model_synced_for: None,
             toast: None,
-            export_frames: 0,
-            export_result: Default::default(),
-            export_waiting: false,
+            export: Export::default(),
             mode: CanvasMode::Surface,
             map_visited: false,
             map_cache: MapCache::default(),
@@ -943,37 +931,9 @@ impl CalcWorkspace {
         }
         let t = tokens(ui.ctx());
         let rect = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let ppp = ui.ctx().pixels_per_point();
-        let size_px = [((rect.width() * ppp).round() as u32).max(1), ((rect.height() * ppp).round() as u32).max(1)];
-
-        // Camera interaction.
+        let resp = self.view.allocate(ui, rect);
         let shift = ui.input(|i| i.modifiers.shift);
-        if resp.dragged_by(egui::PointerButton::Primary) && !shift {
-            let d = resp.drag_delta();
-            if d != EVec2::ZERO {
-                self.camera.orbit(Vec2::new(d.x, d.y));
-                self.preset = ViewPreset::Custom;
-            }
-        }
-        if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
-            let d = resp.drag_delta();
-            self.camera.pan(Vec2::new(d.x, d.y), rect.height());
-        }
-        if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom((-scroll * 0.0012).exp().clamp(0.8, 1.25));
-            }
-        }
-        if resp.double_clicked() {
-            self.apply_preset(ViewPreset::Iso);
-        }
-        let aspect = rect.width().max(1.0) / rect.height().max(1.0);
-        let proj = Projector {
-            vp: self.camera.view_proj(aspect),
-            size: Vec2::new(rect.width(), rect.height()),
-        };
+        let proj = self.view.projector(rect);
         if self.pick_mode && resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
@@ -986,64 +946,30 @@ impl CalcWorkspace {
             self.rebuild_if_needed();
         }
 
-        let (deco, labels) = calc_view::decorations(&self.settings, &self.frame, &self.camera, &proj);
+        let (deco, labels) = calc_view::decorations(&self.settings, &self.frame, &self.view.camera, &proj, ["x", "y", "z"]);
         let pal = self.settings.theme.palette();
-        let view = View {
-            camera: self.camera,
-            clip_half: self.frame.half,
-            background: pal.background,
-            wire: pal.wire,
-        };
-
-        let Some(rs) = frame.wgpu_render_state() else {
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("wgpu is not available", "wgpu 不可用"), FontId::proportional(18.0), t.error);
+        if !self.view.render(ui, frame, rect, &self.scene, self.scene_version, deco, self.frame.half, pal.background, pal.wire) {
             return;
-        };
-        let canvas = self.canvas.get_or_insert_with(|| Canvas {
-            gpu: Gpu3d::new(&rs.device),
-            texture: None,
-            last: None,
-            adapter: rs.adapter.get_info().name,
-        });
-        let key = (view, size_px, self.scene_version);
-        if canvas.last.as_ref() != Some(&key) || canvas.texture.is_none() {
-            if canvas.last.as_ref().map(|l| l.2) != Some(self.scene_version) {
-                canvas.gpu.set_meshes(&rs.device, &self.scene.meshes);
-            }
-            let mut lines = self.scene.lines.clone();
-            lines.extend(deco);
-            canvas.gpu.set_lines(&rs.device, &lines);
-            let recreated = canvas.gpu.render(&rs.device, &rs.queue, size_px, &view);
-            let tex_view = canvas.gpu.view().unwrap();
-            let mut renderer = rs.renderer.write();
-            match canvas.texture {
-                None => canvas.texture = Some(renderer.register_native_texture(&rs.device, tex_view, wgpu::FilterMode::Linear)),
-                Some(id) if recreated => renderer.update_egui_texture_from_wgpu_texture(&rs.device, tex_view, wgpu::FilterMode::Linear, id),
-                _ => {}
-            }
-            canvas.last = Some(key);
         }
-        if let Some(id) = canvas.texture {
-            egui::Image::new(egui::load::SizedTexture::new(id, rect.size()))
-                .corner_radius(12)
-                .paint_at(ui, rect);
-        }
-        ui.painter().rect_stroke(rect, 12, Stroke::new(1.0, t.card_border), egui::StrokeKind::Inside);
         let painter = ui.painter_at(rect);
-        self.labels(&painter, rect, &proj, labels);
-        self.export_step(ui, rect);
-        if let Some(msg) = self.export_result.lock().ok().and_then(|mut r| r.take()) {
+        canvas3d::paint_labels(&painter, rect, &proj, labels);
+        self.point_label(&painter, rect, &proj);
+        self.finish_canvas(ui, rect, &t);
+    }
+
+    /// Export progress and the overlays, shared by both canvas modes.
+    fn finish_canvas(&mut self, ui: &mut Ui, rect: Rect, t: &Tokens) {
+        if let Some(msg) = self.export.step(ui, rect, "surface") {
             self.toast = Some((msg, Instant::now()));
-            self.export_waiting = false;
         }
         // Overlays stay hidden until the screenshot has been taken.
-        if self.export_frames == 0 && !self.export_waiting {
-            self.overlays(ui, rect, &t);
+        if self.export.overlays_visible() {
+            self.overlays(ui, rect, t);
         }
     }
 
     fn status_bar(&mut self, ui: &mut Ui, t: &Tokens) {
-        let adapter = self.canvas.as_ref().map(|c| c.adapter.clone()).unwrap_or_default();
+        let adapter = self.view.adapter();
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(t.sidebar).inner_margin(egui::Margin::symmetric(14, 5)).stroke(Stroke::new(1.0, t.card_border)))
             .show(ui, |ui| {
@@ -1059,7 +985,7 @@ impl CalcWorkspace {
                         match &self.toast {
                             Some((msg, at)) if at.elapsed().as_secs_f32() < 5.0 => {
                                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-                                let c = if msg.starts_with("Saved") || msg.starts_with("已保存") { t.ok } else { t.error };
+                                let c = if export::is_ok(msg) { t.ok } else { t.error };
                                 ui.label(small(msg, c));
                             }
                             _ => {
@@ -1109,61 +1035,7 @@ impl CalcWorkspace {
             ui.ctx().request_repaint();
         }
         ui.painter().rect_stroke(rect, 12, Stroke::new(1.0, t.card_border), egui::StrokeKind::Inside);
-        self.export_step(ui, rect);
-        if let Some(msg) = self.export_result.lock().ok().and_then(|mut r| r.take()) {
-            self.toast = Some((msg, Instant::now()));
-            self.export_waiting = false;
-        }
-        if self.export_frames == 0 && !self.export_waiting {
-            self.overlays(ui, rect, &t);
-        }
-    }
-
-    /// Drive a PNG export: wait a frame with overlays hidden, then ask for a
-    /// window screenshot and crop it to the canvas (3D view plus labels).
-    fn export_step(&mut self, ui: &mut Ui, rect: Rect) {
-        if self.export_frames == 0 {
-            return;
-        }
-        self.export_frames -= 1;
-        if self.export_frames == 1 {
-            self.export_waiting = true;
-            let ppp = ui.ctx().pixels_per_point();
-            let slot = self.export_result.clone();
-            let ctx = ui.ctx().clone();
-            ui.ctx().request_screenshot(move |image| {
-                let msg = save_screenshot(&image, rect, ppp);
-                if let Ok(mut s) = slot.lock() {
-                    *s = Some(msg);
-                }
-                ctx.request_repaint();
-            });
-        }
-        ui.ctx().request_repaint();
-    }
-
-    fn apply_preset(&mut self, p: ViewPreset) {
-        let keep = (self.camera.ortho, self.camera.fov_deg, self.camera.dist);
-        let cam = &mut self.camera;
-        match p {
-            ViewPreset::Iso | ViewPreset::Custom => {
-                *cam = Camera::default();
-                (cam.ortho, cam.fov_deg) = (keep.0, keep.1);
-            }
-            ViewPreset::Front => {
-                cam.yaw = -std::f32::consts::FRAC_PI_2;
-                cam.pitch = 0.0;
-            }
-            ViewPreset::Side => {
-                cam.yaw = 0.0;
-                cam.pitch = 0.0;
-            }
-            ViewPreset::Top => {
-                cam.yaw = -std::f32::consts::FRAC_PI_2;
-                cam.pitch = 1.5705;
-            }
-        }
-        self.preset = if p == ViewPreset::Custom { ViewPreset::Iso } else { p };
+        self.finish_canvas(ui, rect, &t);
     }
 
     fn overlays(&mut self, ui: &mut Ui, rect: Rect, t: &Tokens) {
@@ -1211,30 +1083,13 @@ impl CalcWorkspace {
             ui.horizontal(|ui| {
                 if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(tr("Save the view as PNG in ~/Pictures/Math-crystal", "把视图保存为 PNG（~/Pictures/Math-crystal）")).clicked() {
                     // Hide the overlays, then capture the canvas with its labels.
-                    self.export_frames = 3;
+                    self.export.start();
                 }
                 let map = self.mode == CanvasMode::Map;
-                if !map && !self.camera.ortho {
-                    ui.add(egui::Slider::new(&mut self.camera.fov_deg, 10.0..=80.0).suffix("°").max_decimals(0))
-                        .on_hover_text(tr("Field of view", "视场角"));
-                }
-                let mut proj = if self.camera.ortho { Projection::Ortho } else { Projection::Persp };
-                if !map && segmented(ui, &mut proj, &[(Projection::Ortho, tr("Ortho", "正交"), tr("Orthographic projection", "正交投影")), (Projection::Persp, tr("Persp", "透视"), tr("Perspective projection", "透视投影"))]) {
-                    self.camera.ortho = proj == Projection::Ortho;
-                }
-                ui.add_space(4.0);
-                let mut p = self.preset;
-                if !map && segmented(
-                    ui,
-                    &mut p,
-                    &[
-                        (ViewPreset::Iso, &with_icon(icon::CUBE, "3D"), tr("Default 3D view (double-click the canvas)", "默认 3D 视角（双击画布）")),
-                        (ViewPreset::Front, tr("Front", "正视"), tr("Look along +y: the x-z plane", "沿 +y 方向看：x-z 平面")),
-                        (ViewPreset::Side, tr("Side", "侧视"), tr("Look along -x: the y-z plane", "沿 -x 方向看：y-z 平面")),
-                        (ViewPreset::Top, tr("Top", "俯视"), tr("Look down: the x-y plane", "向下看：x-y 平面")),
-                    ],
-                ) {
-                    self.apply_preset(p);
+                if !map {
+                    self.view.projection_controls(ui);
+                    ui.add_space(4.0);
+                    self.view.preset_controls(ui, ["x", "y", "z"]);
                 }
                 ui.add_space(4.0);
                 let mut m = self.mode;
@@ -1276,43 +1131,8 @@ impl CalcWorkspace {
         chips.push((&mut s.show_field, tr("Gradient field", "梯度场"), tr("Field", "梯度场"), None, tr("∇f across the domain", "整个定义域上的 ∇f")));
         chips.push((&mut s.show_criticals, tr("Critical points", "临界点"), tr("Critical", "临界点"), Some(calc_view::C_SADDLE), tr("Points where ∇f = 0", "∇f = 0 的点")));
         chips.push((&mut s.show_region, tr("Region", "积分区域"), tr("Region", "区域"), Some(calc_view::C_REGION), tr("Integration region (Double integral card)", "积分区域（见“二重积分”卡片）")));
-        let active = chips.iter().filter(|c| *c.0).count();
-        let toggle_label = if self.layers_open {
-            with_icon(icon::CHEVRON_DOWN, tr("Layers", "图层"))
-        } else if active > 0 {
-            format!("{}  {active}", with_icon(icon::LAYERS, tr("Layers", "图层")))
-        } else {
-            with_icon(icon::LAYERS, tr("Layers", "图层"))
-        };
-        let measure = |ui: &Ui, text: &str, sw: bool| {
-            ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), Color32::WHITE).size().x + 22.0 + if sw { 14.0 } else { 0.0 }
-        };
-        let toggle_w = measure(ui, &toggle_label, false) + 6.0;
-        let width_of = |short: bool| {
-            toggle_w + chips.iter().map(|c| measure(ui, if short { c.2 } else { c.1 }, c.3.is_some()) + 6.0).sum::<f32>() + 10.0
-        };
-        let short = width_of(false) > inner.width() - 8.0;
-        let w = if self.layers_open { width_of(short).min(inner.width()) } else { toggle_w + 10.0 };
-        let bottom = Rect::from_center_size(Pos2::new(inner.center().x, inner.max.y - 20.0), EVec2::new(w + 2.0, 40.0));
-        let mut bc = ui.new_child(UiBuilder::new().max_rect(bottom).layout(Layout::left_to_right(Align::Center)));
-        let mut open = self.layers_open;
-        overlay_frame(t).inner_margin(egui::Margin::symmetric(8, 6)).show(&mut bc, |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let mut shown = open;
-            chip(ui, &mut shown, &toggle_label, None).on_hover_text(if open { tr("Hide the layer list", "收起图层列表") } else { tr("Show or hide parts of the drawing", "显示或隐藏图中的元素") });
-            if shown != open {
-                open = shown;
-                return;
-            }
-            if !open {
-                return;
-            }
-            for (v, full, brief, color, tip) in chips {
-                let label = if short { brief } else { full };
-                chip(ui, v, label, color.map(hex32)).on_hover_text(if short { format!("{full}: {tip}") } else { tip.to_string() });
-            }
-        });
-        self.layers_open = open;
+        let chips = chips.into_iter().map(|(v, full, brief, color, tip)| (v, full, brief, color.map(hex32), tip)).collect();
+        layer_bar(ui, inner, &mut self.layers_open, chips);
     }
 
     /// Shift+click: move P to the surface sample nearest the cursor.
@@ -1322,7 +1142,7 @@ impl CalcWorkspace {
         if n < 2 {
             return;
         }
-        let eye = self.camera.eye();
+        let eye = self.view.camera.eye();
         let mut best: Option<(f32, f64, f64)> = None;
         for (k, &z) in self.z_samples.iter().enumerate() {
             if !z.is_finite() {
@@ -1351,29 +1171,9 @@ impl CalcWorkspace {
         }
     }
 
-    fn labels(&self, painter: &egui::Painter, rect: Rect, proj: &Projector, labels: Vec<calc_view::Label>) {
-        let t = tokens(painter.ctx());
+    /// "P" pill next to the point.
+    fn point_label(&self, painter: &egui::Painter, rect: Rect, proj: &Projector) {
         let to_screen = |w: Vec3| proj.project(w).map(|p| Pos2::new(rect.min.x + p.x, rect.min.y + p.y));
-        let mut taken: Vec<Rect> = Vec::new();
-        let mut labels = labels;
-        // Axis names first so tick labels give way to them.
-        labels.sort_by_key(|l| (l.kind != LabelKind::Axis) as u8);
-        for l in labels {
-            let Some(p) = to_screen(l.world) else { continue };
-            let (font, color) = match l.kind {
-                LabelKind::Axis => (FontId::new(17.0, egui::FontFamily::Proportional), t.text),
-                _ => (FontId::monospace(11.5), t.muted),
-            };
-            let galley = painter.layout_no_wrap(l.text, font, color);
-            let size = galley.size();
-            let center = p + egui::vec2(l.push.x, l.push.y) * (size.x * 0.5 + 2.0).min(14.0);
-            let r = Rect::from_center_size(center, size).expand(1.5);
-            if !rect.shrink(4.0).contains_rect(r) || taken.iter().any(|q| q.intersects(r)) {
-                continue;
-            }
-            taken.push(r);
-            painter.galley(r.min + egui::vec2(1.5, 1.5), galley, color);
-        }
         // Point label with a soft background pill.
         if let Some(d) = &self.derivs
             && self.settings.show_point
@@ -1455,7 +1255,7 @@ fn readout(ui: &mut Ui, t: &Tokens, d: Option<&PointDerivs>) {
 }
 
 /// Label / hint on the left, value on the right.
-fn kv(ui: &mut Ui, t: &Tokens, name: &str, hint: &str, value: &str) {
+pub(crate) fn kv(ui: &mut Ui, t: &Tokens, name: &str, hint: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(name).color(t.text));
         if !hint.is_empty() {
@@ -1467,21 +1267,21 @@ fn kv(ui: &mut Ui, t: &Tokens, name: &str, hint: &str, value: &str) {
     });
 }
 
-fn wrap_deg(a: f64) -> f64 {
+pub(crate) fn wrap_deg(a: f64) -> f64 {
     let w = (a + 180.0).rem_euclid(360.0) - 180.0;
     if w == -180.0 { 180.0 } else { w }
 }
 
-fn fmt_sci(v: f64) -> String {
+pub(crate) fn fmt_sci(v: f64) -> String {
     if v == 0.0 { "0".into() } else { format!("{v:.1e}") }
 }
 
-fn hex32(c: u32) -> Color32 {
+pub(crate) fn hex32(c: u32) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
 /// Edit a (lo, hi) range; returns true when changed. Keeps lo < hi.
-fn range_edit(ui: &mut Ui, r: &mut (f64, f64)) -> bool {
+pub(crate) fn range_edit(ui: &mut Ui, r: &mut (f64, f64)) -> bool {
     let speed = ((r.1 - r.0).abs() * 0.005).max(1e-4);
     let mut changed = ui.add(egui::DragValue::new(&mut r.0).speed(speed).max_decimals(4)).changed();
     ui.label("…");
@@ -1513,41 +1313,8 @@ pub fn fmt_val(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.replace('-', "−") }
 }
 
-fn fmt_short(v: f64) -> String {
+pub(crate) fn fmt_short(v: f64) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.replace('-', "−") }
-}
-
-/// Crop a window screenshot to the canvas and save it; returns a status message.
-fn save_screenshot(image: &egui::ColorImage, rect: Rect, ppp: f32) -> String {
-    let crop = image.region(&rect.shrink(1.0), Some(ppp));
-    let [w, h] = crop.size;
-    let rgba: Vec<u8> = crop.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
-    let dir = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join("Pictures/Math-crystal");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return format!("{} {e}", tr("Export failed:", "导出失败:"));
-    }
-    let path = dir.join(format!("surface-{}.png", timestamp()));
-    match write_png(&path, w as u32, h as u32, &rgba) {
-        Ok(()) => format!("{} {}", tr("Saved", "已保存"), path.display()),
-        Err(e) => format!("{} {e}", tr("Export failed:", "导出失败:")),
-    }
-}
-
-/// Local-ish timestamp YYYYmmdd-HHMMSS (UTC; no timezone database needed).
-fn timestamp() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Civil-from-days (Howard Hinnant).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }

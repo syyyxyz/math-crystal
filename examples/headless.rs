@@ -34,7 +34,7 @@ fn main() {
     let icon = std::env::var("ICON").is_ok();
     let size = if icon { [256u32, 256u32] } else { [1200u32, 800u32] };
     let proj = Projector { vp: cam.view_proj(size[0] as f32 / size[1] as f32), size: Vec2::new(size[0] as f32, size[1] as f32) };
-    let (deco, labels) = calc_view::decorations(&s, &built.frame, &cam, &proj);
+    let (deco, labels) = calc_view::decorations(&s, &built.frame, &cam, &proj, ["x", "y", "z"]);
     let mut scene = built.scene;
     if !icon { scene.lines.extend(deco); }
     if icon { cam.dist = 3.9; cam.target = glam::Vec3::new(0.0, 0.0, -0.1); }
