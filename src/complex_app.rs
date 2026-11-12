@@ -1165,7 +1165,7 @@ fn arrow(p: &egui::Painter, pts: &[Pos2], col: Color32) {
     }
 }
 
-fn tooltip_box(p: &egui::Painter, rect: Rect, at: Pos2, txt: &str, t: &Tokens) {
+pub(crate) fn tooltip_box(p: &egui::Painter, rect: Rect, at: Pos2, txt: &str, t: &Tokens) {
     let galley = p.layout_no_wrap(txt.to_string(), FontId::monospace(12.0), t.text);
     let size = galley.size() + vec2(14.0, 10.0);
     let mut r = Rect::from_min_size(at + vec2(16.0, 12.0), size);

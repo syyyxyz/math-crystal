@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use egui::{Align, Color32, FontId, Layout, RichText, Stroke, Ui, vec2};
-use egui_plot::{HoverPosition, Line, LineStyle, Plot, PlotPoints, Span, VLine};
+use egui_plot::{Line, LineStyle, Plot, PlotPoints, Span, VLine};
 use num_complex::Complex64 as C64;
 
 use crate::app::{fmt_sci, fmt_short, fmt_val, kv};
@@ -88,6 +88,20 @@ pub struct SpectrumWorkspace {
     /// Plot ids and the x-axis link include this; bumped on reset so the
     /// plots forget their old bounds.
     plot_gen: u32,
+    /// Plot heights and which plots are unfolded: f(t), top, bottom.
+    heights: [f32; 3],
+    panel_open: [bool; 3],
+    t0: f64,
+    show_t0: bool,
+    /// Pointer position over the plots last frame (ω in rad, t).
+    hover_w: Option<f64>,
+    hover_t: Option<f64>,
+    /// Plot rect and marker x on screen, for grabbing the markers.
+    marker_px: [Option<(egui::Rect, f32)>; 3],
+    /// What ω0 was snapped to.
+    snapped: Option<&'static str>,
+    /// Marker being dragged: 0 = t0, 1 = ω0.
+    grab: Option<usize>,
     /// Put Ω back to a quarter of the range for a new signal.
     recon_fresh: bool,
 }
@@ -102,6 +116,7 @@ const C_RE: Color32 = Color32::from_rgb(0x1c, 0x7e, 0xd6);
 const C_IM: Color32 = Color32::from_rgb(0xf0, 0x8c, 0x00);
 const C_RECON: Color32 = Color32::from_rgb(0xe0, 0x31, 0x31);
 const C_W0: Color32 = Color32::from_rgb(0x70, 0x48, 0xe8);
+const C_T0: Color32 = Color32::from_rgb(0x0c, 0xa6, 0x78);
 
 impl SpectrumWorkspace {
     pub fn new(src: &str) -> Self {
@@ -133,6 +148,15 @@ impl SpectrumWorkspace {
             reset_plots: true,
             dirty: false,
             plot_gen: 0,
+            heights: [240.0, 300.0, 220.0],
+            panel_open: [true; 3],
+            t0: 0.0,
+            show_t0: false,
+            hover_w: None,
+            hover_t: None,
+            marker_px: [None; 3],
+            snapped: None,
+            grab: None,
             recon_fresh: true,
         };
         s.recompile();
@@ -250,7 +274,7 @@ impl SpectrumWorkspace {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let small = |s: &str, c: Color32| RichText::new(s).size(12.0).color(c);
-                    ui.label(small(tr("Drag to pan · Scroll to zoom along the axis · Double-click to reset · Click a spectrum to set ω₀", "拖动平移 · 滚轮沿横轴缩放 · 双击重置 · 单击频谱设置 ω₀"), t.faint));
+                    ui.label(small(tr("Scroll: page · Ctrl+scroll: zoom the axis · Drag: pan · Double-click: reset · Click: pick a point (snaps to peaks/zeros, Alt: no snap) · Drag a marker to move it", "滚轮：滚动页面 · Ctrl+滚轮：缩放横轴 · 拖动：平移 · 双击：重置 · 单击：取点（吸附峰值/零点，按住 Alt 不吸附）· 拖动标记线可移动"), t.faint));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &self.toast {
                         Some((msg, at)) if at.elapsed().as_secs_f32() < 5.0 => {
                             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
@@ -586,9 +610,9 @@ impl SpectrumWorkspace {
     // ---- Plots -----------------------------------------------------------
 
     fn plots(&mut self, ui: &mut Ui, t: &Tokens) {
-        let rect = ui.available_rect_before_wrap();
-        // Toolbar.
         let w = self.wname();
+        // Toolbar (fixed above the scrolling plots).
+        let mut fit = false;
         ui.horizontal(|ui| {
             overlay_frame(t).inner_margin(egui::Margin::same(5)).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -600,8 +624,12 @@ impl SpectrumWorkspace {
                         segmented(ui, &mut self.db, &[(false, tr("Linear", "线性"), ""), (true, "dB", tr("20 log₁₀ |F|", "20 log₁₀ |F|"))]);
                         ui.add_space(4.0);
                     }
-                    chip(ui, &mut self.show_w0, &format!("{w}₀"), Some(C_W0)).on_hover_text(tr("Frequency marker", "频率标记"));
+                    chip(ui, &mut self.show_t0, "t₀", Some(C_T0)).on_hover_text(tr("Time marker (click the f(t) plot)", "时间标记（单击 f(t) 图）"));
+                    chip(ui, &mut self.show_w0, &format!("{w}₀"), Some(C_W0)).on_hover_text(tr("Frequency marker (click a spectrum)", "频率标记（单击频谱图）"));
                     chip(ui, &mut self.recon_on, tr("Reconstruction", "带限重建"), Some(C_RECON)).on_hover_text(tr("Band-limited f_Ω(t)", "带限信号 f_Ω(t)"));
+                    if ui.button(with_icon(icon::RULER, "")).on_hover_text(tr("Fit the open plots into the window", "让展开的图适应窗口高度")).clicked() {
+                        fit = true;
+                    }
                     if ui.button(with_icon(icon::RESTORE, "")).on_hover_text(tr("Reset the plot ranges", "重置坐标范围")).clicked() {
                         self.reset_plots = true;
                     }
@@ -612,174 +640,484 @@ impl SpectrumWorkspace {
             });
         });
         ui.add_space(6.0);
-        let Some(sp) = &self.spec else { return };
-        let plots_rect = egui::Rect::from_min_max(ui.cursor().min, rect.max);
-        // Frames add margins and item spacing on top of the set heights.
-        let avail = ui.available_height() - 3.0 * ui.spacing().item_spacing.y - 6.0;
-        let gap = 6.0;
-        let h_time = ((avail - 2.0 * gap) * 0.32).max(80.0);
-        let h_top = ((avail - 2.0 * gap) * 0.38).max(80.0);
-        let h_bot = (avail - 2.0 * gap - h_time - h_top).max(70.0);
+        if self.spec.is_none() {
+            return;
+        }
+        let view_rect = egui::Rect::from_min_max(ui.cursor().min, ui.max_rect().max);
+        if fit {
+            let n_open = self.panel_open.iter().filter(|o| **o).count();
+            let free = view_rect.height() - 3.0 * PANEL_CHROME - 4.0;
+            let weights = [0.32f32, 0.38, 0.30];
+            let total: f32 = weights.iter().zip(&self.panel_open).filter(|(_, o)| **o).map(|(w, _)| w).sum();
+            if n_open > 0 {
+                let closed_h = (3 - n_open) as f32 * (PANEL_CLOSED - PANEL_CHROME);
+                for k in 0..3 {
+                    if self.panel_open[k] {
+                        self.heights[k] = ((free - closed_h) * weights[k] / total).max(MIN_H);
+                    }
+                }
+            }
+        }
         if std::mem::take(&mut self.reset_plots) {
             self.plot_gen += 1;
         }
         let generation = self.plot_gen;
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        let zoom_x = |pui: &mut egui_plot::PlotUi| {
-            if pui.response().hovered() && scroll != 0.0 {
-                pui.zoom_bounds_around_hovered(vec2((scroll * 0.0015).exp(), 1.0));
-                pui.set_auto_bounds([false, true]);
+
+        // Local copies of the state the closures change.
+        let mut heights = self.heights;
+        let mut open = self.panel_open;
+        let (mut w0, mut show_w0, mut t0, mut show_t0) = (self.w0, self.show_w0, self.t0, self.show_t0);
+        let (prev_hw, prev_ht) = (self.hover_w, self.hover_t);
+        let (mut hover_w, mut hover_t) = (None, None);
+        let mut marker_px = self.marker_px;
+        let mut snapped = self.snapped;
+        let alt = ui.input(|i| i.modifiers.alt);
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let near = |px: Option<(egui::Rect, f32)>, shown: bool| shown && matches!((pointer, px), (Some(p), Some((r, x))) if r.contains(p) && (p.x - x).abs() < 6.0);
+        // A press next to a marker grabs it until the button is released.
+        let (pressed, down) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
+        // Still applied on the release frame so the marker ends where the pointer did.
+        let mut grab = self.grab;
+        if pressed {
+            if near(marker_px[0], show_t0) {
+                grab = Some(0);
+            } else if near(marker_px[1], show_w0) || near(marker_px[2], show_w0) {
+                grab = Some(1);
+            }
+        }
+
+        let sp = self.spec.as_ref().unwrap();
+        let sig = self.sig.as_ref();
+        let conv = self.conv;
+        let view = self.view;
+        let db = self.db;
+        let recon = &self.recon;
+        let recon_on = self.recon_on && !recon.is_empty();
+        let complex_sig = self.stats.as_ref().is_some_and(|s| !s.sym.real);
+        let max_mag = self.band.iter().map(|(_, v)| v.norm()).fold(0.0, f64::max).max(1e-300);
+        let tiny = 1e-10 * max_mag;
+        let clean = |v: C64| C64::new(if v.re.abs() < tiny { 0.0 } else { v.re }, if v.im.abs() < tiny { 0.0 } else { v.im });
+        let floor_db = 20.0 * max_mag.log10() - 120.0;
+        let top_q = move |v: C64| match (view, db) {
+            (View::MagPhase, false) => v.norm(),
+            (View::MagPhase, true) => (20.0 * v.norm().log10()).max(floor_db),
+            (View::ReIm, _) => v.re,
+        };
+        let bot_q = move |v: C64| if view == View::MagPhase { v.arg() } else { v.im };
+        let x_of = |om: f64| conv.from_omega(om);
+        let band: Vec<(f64, C64)> = self.band.iter().map(|(om, v)| (*om, clean(*v))).collect();
+
+        // Values for the readouts (exact, not from the drawn points).
+        let f_at = |tt: f64| sig.map(|s| s.eval(tt)).unwrap_or(C64::new(f64::NAN, 0.0));
+        let recon_at = |tt: f64| -> Option<C64> {
+            if !recon_on {
+                return None;
+            }
+            let k = (tt - sp.t[0]) / sp.h;
+            if k < 0.0 || k > (recon.len() - 1) as f64 {
+                return None;
+            }
+            let i = (k.floor() as usize).min(recon.len() - 2);
+            let a = k - i as f64;
+            Some(recon[i] * (1.0 - a) + recon[i + 1] * a)
+        };
+        let time_text = |tt: f64, label: &str| {
+            let v = f_at(tt);
+            let mut s = format!("{label} = {}   f = {}", fmt_short(tt), fmt_c(v));
+            if let Some(r) = recon_at(tt) {
+                s += &format!("   f_Ω = {}", fmt_val(r.re));
+            }
+            s
+        };
+        let freq_text = |om: f64, label: &str, bottom: bool| {
+            let v = clean(sp.at(om));
+            let x = fmt_short(x_of(om));
+            match (view, bottom) {
+                (View::MagPhase, false) => {
+                    let m = v.norm();
+                    let dbs = if m > 0.0 { format!("   {} dB", fmt_short(20.0 * m.log10())) } else { String::new() };
+                    format!("{label} = {x}   |F| = {}{dbs}   F = {}", fmt_val(m), fmt_c(v))
+                }
+                (View::MagPhase, true) => format!("{label} = {x}   arg F = {}°", fmt_short(v.arg().to_degrees())),
+                (View::ReIm, false) => format!("{label} = {x}   Re F = {}", fmt_val(v.re)),
+                (View::ReIm, true) => format!("{label} = {x}   Im F = {}", fmt_val(v.im)),
             }
         };
-        let frame = |ui: &mut Ui, h: f32, add: &mut dyn FnMut(&mut Ui)| {
-            egui::Frame::new().fill(t.card).stroke(Stroke::new(1.0, t.card_border)).corner_radius(10).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                ui.set_height(h - 12.0);
-                add(ui);
-            });
-        };
+        let w0_label = format!("{w}₀");
+        let snap_note = snapped.map(|k| format!("   ({k})")).unwrap_or_default();
+        // Headers show the picked points; hover values go next to the cursor.
+        let readout_t = if show_t0 { time_text(t0, "t₀") } else { tr("click to pick t₀", "单击取点 t₀").to_string() };
+        let readout_f = |bottom: bool| if show_w0 { freq_text(w0, &w0_label, bottom) + &snap_note } else { format!("{} {w}₀", tr("click to pick", "单击取点")) };
+        let (readout_top, readout_bot) = (readout_f(false), readout_f(true));
 
-        // ---- f(t) ----
         let decim = |n: usize| (n / 6000).max(1);
         let step = decim(sp.t.len());
-        let re: Vec<[f64; 2]> = sp.t.iter().zip(&sp.f).step_by(step).map(|(t, v)| [*t, v.re]).collect();
-        let complex_sig = self.stats.as_ref().is_some_and(|s| !s.sym.real);
-        let im: Vec<[f64; 2]> = sp.t.iter().zip(&sp.f).step_by(step).map(|(t, v)| [*t, v.im]).collect();
-        let recon: Vec<[f64; 2]> = if self.recon_on { sp.t.iter().zip(&self.recon).step_by(step).map(|(t, v)| [*t, v.re]).collect() } else { vec![] };
-        let tw = (self.window.0, self.window.1);
-        frame(ui, h_time, &mut |ui| {
-            let mut plot = Plot::new(("sig_t", generation))
-                .allow_scroll(false)
-                .allow_zoom([true, false])
-                .legend(egui_plot::Legend::default().position(egui_plot::Corner::RightTop))
-                .label_formatter(|pos: &HoverPosition| {
-                    let (name, p) = match pos {
-                        HoverPosition::NearDataPoint { plot_name, position, .. } => (*plot_name, position),
-                        HoverPosition::Elsewhere { position } => ("", position),
-                    };
-                    Some(format!("{name}\nt = {}\ny = {}", fmt_short(p.x), fmt_val(p.y)))
-                });
-            plot = plot.default_x_bounds(tw.0, tw.1);
-            plot.show(ui, |pui| {
-                zoom_x(pui);
-                pui.line(Line::new("Re f(t)", PlotPoints::from(re.clone())).color(C_RE).width(2.0));
-                if complex_sig {
-                    pui.line(Line::new("Im f(t)", PlotPoints::from(im.clone())).color(C_IM).width(1.6).style(LineStyle::dashed_loose()));
-                }
-                if !recon.is_empty() {
-                    pui.line(Line::new("f_Ω(t)", PlotPoints::from(recon.clone())).color(C_RECON).width(1.6));
-                }
-            });
-        });
-        ui.add_space(gap);
-
-        // ---- Spectrum ----
-        let conv = self.conv;
-        let x = |w: f64| conv.from_omega(w);
-        let max_mag = self.band.iter().map(|(_, v)| v.norm()).fold(0.0, f64::max).max(1e-300);
-        // Rounding noise in a real or imaginary F would make its phase flip
-        // between +π and −π: drop parts below 1e-10 of the peak.
-        let tiny = 1e-10 * max_mag;
-        let band: Vec<(f64, C64)> = self.band.iter().map(|(w, v)| (*w, C64::new(if v.re.abs() < tiny { 0.0 } else { v.re }, if v.im.abs() < tiny { 0.0 } else { v.im }))).collect();
-        let band = &band;
-        let floor_db = 20.0 * max_mag.log10() - 120.0;
-        let (top_name, top): (String, Vec<[f64; 2]>) = match (self.view, self.db) {
-            (View::MagPhase, false) => (format!("|F({w})|"), band.iter().map(|(om, v)| [x(*om), v.norm()]).collect()),
-            (View::MagPhase, true) => (format!("20 log₁₀|F({w})|"), band.iter().map(|(om, v)| [x(*om), (20.0 * v.norm().log10()).max(floor_db)]).collect()),
-            (View::ReIm, _) => (format!("Re F({w})"), band.iter().map(|(om, v)| [x(*om), v.re]).collect()),
-        };
-        // Phase in segments: skip where |F| is negligible and break at wraps.
-        let mut phase_segs: Vec<Vec<[f64; 2]>> = Vec::new();
-        let im_part: Vec<[f64; 2]>;
-        if self.view == View::MagPhase {
+        let pts = |f: &dyn Fn(&C64) -> f64, v: &[C64]| -> Vec<[f64; 2]> { sp.t.iter().zip(v).step_by(step).map(|(t, v)| [*t, f(v)]).collect() };
+        let re_t = pts(&|v| v.re, &sp.f);
+        let im_t = pts(&|v| v.im, &sp.f);
+        let rc_t = if recon_on { pts(&|v| v.re, recon) } else { vec![] };
+        let tw = self.window;
+        let xr = x_of(self.w_max);
+        let rw = recon_on.then(|| x_of(self.recon_w));
+        let top: Vec<[f64; 2]> = band.iter().map(|(om, v)| [x_of(*om), top_q(*v)]).collect();
+        let mut bottom_segs: Vec<Vec<[f64; 2]>> = Vec::new();
+        if view == View::MagPhase {
+            // Skip where |F| is negligible and break at wraps.
             let mut cur: Vec<[f64; 2]> = Vec::new();
-            for (om, v) in band {
+            for (om, v) in &band {
                 let ok = v.norm() > 1e-6 * max_mag;
                 let a = v.arg();
                 if !ok || cur.last().is_some_and(|p| (p[1] - a).abs() > std::f64::consts::PI) {
                     if cur.len() > 1 {
-                        phase_segs.push(std::mem::take(&mut cur));
+                        bottom_segs.push(std::mem::take(&mut cur));
                     }
                     cur.clear();
                 }
                 if ok {
-                    cur.push([x(*om), a]);
+                    cur.push([x_of(*om), a]);
                 }
             }
             if cur.len() > 1 {
-                phase_segs.push(cur);
+                bottom_segs.push(cur);
             }
-            im_part = vec![];
         } else {
-            im_part = band.iter().map(|(om, v)| [x(*om), v.im]).collect();
+            bottom_segs.push(band.iter().map(|(om, v)| [x_of(*om), v.im]).collect());
         }
-        let xr = x(self.w_max);
-        let w0 = self.show_w0.then(|| x(self.w0));
-        let rw = self.recon_on.then(|| x(self.recon_w));
+        let top_name = match (view, db) {
+            (View::MagPhase, false) => format!("|F({w})|"),
+            (View::MagPhase, true) => format!("20 log₁₀|F({w})|"),
+            (View::ReIm, _) => format!("Re F({w})"),
+        };
+        let bot_name = if view == View::MagPhase { format!("arg F({w})") } else { format!("Im F({w})") };
         let link = ui.scope_id().with(("spectrum_x", generation));
-        let mut clicked: Option<f64> = None;
-        let fmt_label = move |pos: &HoverPosition| {
-            let (name, p) = match pos {
-                HoverPosition::NearDataPoint { plot_name, position, .. } => (*plot_name, position),
-                HoverPosition::Elsewhere { position } => ("", position),
-            };
-            Some(format!("{name}\n{w} = {}\ny = {}", fmt_short(p.x), fmt_val(p.y)))
-        };
-        let add_marks = |pui: &mut egui_plot::PlotUi| {
-            if let Some(r) = rw {
-                pui.span(Span::new(format!("|{w}| ≤ Ω"), -r..=r).fill(C_RECON.gamma_multiply(0.08)).border_color(C_RECON.gamma_multiply(0.5)).border_width(1.0));
-            }
-            if let Some(x0) = w0 {
-                pui.vline(VLine::new(format!("{w}₀"), x0).color(C_W0).width(1.5));
-            }
-        };
-        frame(ui, h_top, &mut |ui| {
-            let mut plot = Plot::new(("spec_top", generation)).allow_scroll(false).allow_zoom([true, false]).link_axis(link, [true, false]).label_formatter(fmt_label).legend(egui_plot::Legend::default().position(egui_plot::Corner::RightTop));
-            plot = plot.default_x_bounds(-xr, xr);
-            let r = plot.show(ui, |pui| {
-                zoom_x(pui);
-                add_marks(pui);
-                pui.line(Line::new(top_name.clone(), PlotPoints::from(top.clone())).color(C_RE).width(2.0));
-                pui.pointer_coordinate()
-            });
-            if r.response.clicked()
-                && let Some(p) = r.inner
-            {
-                clicked = Some(p.x);
-            }
-        });
-        ui.add_space(gap);
-        frame(ui, h_bot, &mut |ui| {
-            let name = if self.view == View::MagPhase { format!("arg F({w})") } else { format!("Im F({w})") };
-            let mut plot = Plot::new(("spec_bottom", generation)).allow_scroll(false).allow_zoom([true, false]).link_axis(link, [true, false]).label_formatter(fmt_label).legend(egui_plot::Legend::default().position(egui_plot::Corner::RightTop));
-            plot = plot.default_x_bounds(-xr, xr);
-            if self.view == View::MagPhase {
-                plot = plot.default_y_bounds(-3.3, 3.3);
-            }
-            let r = plot.show(ui, |pui| {
-                zoom_x(pui);
-                add_marks(pui);
-                if self.view == View::MagPhase {
-                    // One legend entry: same name for every segment.
-                    for seg in &phase_segs {
-                        pui.line(Line::new(name.clone(), PlotPoints::from(seg.clone())).color(C_IM).width(1.8));
-                    }
-                } else {
-                    pui.line(Line::new(name.clone(), PlotPoints::from(im_part.clone())).color(C_IM).width(2.0));
+        let legend = || egui_plot::Legend::default().position(egui_plot::Corner::RightTop);
+        let cross = Color32::from_gray(if t.dark { 170 } else { 110 }).gamma_multiply(0.7);
+
+        egui::ScrollArea::vertical().id_salt("spectrum_scroll").scroll_source(egui::scroll_area::ScrollSource { scroll_bar: true, mouse_wheel: true, ..egui::scroll_area::ScrollSource::NONE }).auto_shrink(false).show(ui, |ui| {
+            // ---- f(t) ----
+            panel(ui, t, "f(t)", &readout_t, &mut heights[0], &mut open[0], |ui, h| {
+                let dragging_marker = grab == Some(0);
+                let r = Plot::new(("sig_t", generation))
+                    .height(h)
+                    .allow_scroll(false)
+                    .allow_zoom([true, false])
+                    .allow_drag(!dragging_marker)
+                    .show_x(false)
+                    .show_y(false)
+                    .x_grid_spacer(spacer125)
+                    .legend(legend())
+                    .default_x_bounds(tw.0, tw.1)
+                    .show(ui, |pui| {
+                        pui.line(Line::new("Re f(t)", PlotPoints::from(re_t.clone())).color(C_RE).width(2.0));
+                        if complex_sig {
+                            pui.line(Line::new("Im f(t)", PlotPoints::from(im_t.clone())).color(C_IM).width(1.6).style(LineStyle::dashed_loose()));
+                        }
+                        if !rc_t.is_empty() {
+                            pui.line(Line::new("f_Ω(t)", PlotPoints::from(rc_t.clone())).color(C_RECON).width(1.6));
+                        }
+                        let hovered = pui.response().hovered();
+                        let coord = pui.pointer_coordinate();
+                        let mark = |pui: &mut egui_plot::PlotUi, x: f64, color: Color32, dashed: bool| {
+                            let mut l = VLine::new("", x).color(color).width(if dashed { 1.0 } else { 1.5 });
+                            if dashed {
+                                l = l.style(LineStyle::dashed_dense());
+                            }
+                            pui.vline(l.allow_hover(false));
+                            let v = f_at(x);
+                            let mut dots = vec![([x, v.re], C_RE)];
+                            if complex_sig {
+                                dots.push(([x, v.im], C_IM));
+                            }
+                            if let Some(r) = recon_at(x) {
+                                dots.push(([x, r.re], C_RECON));
+                            }
+                            for (p, c) in dots {
+                                if p[1].is_finite() {
+                                    pui.points(egui_plot::Points::new("", vec![p]).radius(4.0).color(c).allow_hover(false));
+                                }
+                            }
+                        };
+                        if show_t0 {
+                            mark(pui, t0, C_T0, false);
+                        }
+                        if hovered && let Some(c) = coord {
+                            mark(pui, c.x, cross, true);
+                        }
+                        (coord, hovered)
+                    });
+                let (coord, hovered) = r.inner;
+                if hovered
+                    && let (Some(c), Some(p)) = (coord, pointer)
+                {
+                    crate::complex_app::tooltip_box(&ui.painter_at(r.response.rect), r.response.rect, p, &time_text(c.x, "t").replace("   ", "\n"), t);
                 }
-                pui.pointer_coordinate()
+                if hovered {
+                    hover_t = coord.map(|c| c.x);
+                    if dragging_marker || near(marker_px[0], show_t0) {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                }
+                if let Some(c) = coord
+                    && (r.response.clicked() || dragging_marker)
+                {
+                    t0 = c.x;
+                    show_t0 = true;
+                }
+                marker_px[0] = Some((r.response.rect, r.transform.position_from_point_x(t0)));
             });
-            if r.response.clicked()
-                && let Some(p) = r.inner
-            {
-                clicked = Some(p.x);
+
+            // ---- Spectrum: top and bottom share the frequency axis ----
+            for (k, (name, readout)) in [(top_name.clone(), &readout_top), (bot_name.clone(), &readout_bot)].into_iter().enumerate() {
+                let idx = k + 1;
+                let is_top = k == 0;
+                let xw0 = x_of(w0);
+                panel(ui, t, &name, readout, &mut heights[idx], &mut open[idx], |ui, h| {
+                    let dragging_marker = grab == Some(1);
+                    let mut plot = Plot::new((if is_top { "spec_top" } else { "spec_bottom" }, generation))
+                        .height(h)
+                        .allow_scroll(false)
+                        .allow_zoom([true, false])
+                        .allow_drag(!dragging_marker)
+                        .link_axis(link, [true, false])
+                        .show_x(false)
+                        .show_y(false)
+                        .x_grid_spacer(spacer125)
+                        .legend(legend())
+                        .default_x_bounds(-xr, xr);
+                    if !is_top && view == View::MagPhase {
+                        plot = plot.default_y_bounds(-3.3, 3.3);
+                    }
+                    let r = plot.show(ui, |pui| {
+                        if let Some(rr) = rw {
+                            pui.span(Span::new(format!("|{w}| ≤ Ω"), -rr..=rr).fill(C_RECON.gamma_multiply(0.08)).border_color(C_RECON.gamma_multiply(0.5)).border_width(1.0));
+                        }
+                        if is_top {
+                            pui.line(Line::new(name.clone(), PlotPoints::from(top.clone())).color(C_RE).width(2.0));
+                        } else {
+                            for seg in &bottom_segs {
+                                pui.line(Line::new(name.clone(), PlotPoints::from(seg.clone())).color(C_IM).width(1.8));
+                            }
+                        }
+                        let q = |v: C64| if is_top { top_q(v) } else { bot_q(v) };
+                        let mark = |pui: &mut egui_plot::PlotUi, om: f64, color: Color32, dashed: bool| {
+                            let x = x_of(om);
+                            let mut l = VLine::new("", x).color(color).width(if dashed { 1.0 } else { 1.5 });
+                            if dashed {
+                                l = l.style(LineStyle::dashed_dense());
+                            }
+                            pui.vline(l.allow_hover(false));
+                            let y = q(clean(sp.at(om)));
+                            if y.is_finite() {
+                                pui.points(egui_plot::Points::new("", vec![[x, y]]).radius(4.5).color(if is_top { C_RE } else { C_IM }).allow_hover(false));
+                            }
+                        };
+                        if show_w0 {
+                            mark(pui, w0, C_W0, false);
+                        }
+                        let hovered = pui.response().hovered();
+                        let coord = pui.pointer_coordinate();
+                        // Crosshair in both spectrum plots (the other one uses last frame's position).
+                        let other = marker_px[if is_top { 2 } else { 1 }].map(|m| m.0);
+                        let cross_om = if hovered {
+                            coord.map(|c| conv.to_omega(c.x))
+                        } else {
+                            match (pointer, other) {
+                                // Same x axis and width: the pointer's x maps to the same frequency.
+                                (Some(p), Some(o)) if o.contains(p) => Some(conv.to_omega(pui.transform().value_from_position(egui::pos2(p.x, pui.transform().frame().center().y)).x)),
+                                _ => None,
+                            }
+                        };
+                        if let Some(om) = cross_om {
+                            mark(pui, om, cross, true);
+                        }
+                        (coord, hovered)
+                    });
+                    let (coord, hovered) = r.inner;
+                    if hovered
+                        && let (Some(c), Some(p)) = (coord, pointer)
+                    {
+                        let txt = freq_text(conv.to_omega(c.x), w, false) + "\n" + &freq_text(conv.to_omega(c.x), w, true).split("   ").skip(1).collect::<Vec<_>>().join("   ");
+                        let txt = if view == View::MagPhase { txt.replacen("   ", "\n", 3) } else { txt.replacen("   ", "\n", 1) };
+                        crate::complex_app::tooltip_box(&ui.painter_at(r.response.rect), r.response.rect, p, &txt, t);
+                    }
+                    if hovered {
+                        hover_w = coord.map(|c| conv.to_omega(c.x));
+                        if dragging_marker || near(marker_px[idx], show_w0) {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                    }
+                    if let Some(c) = coord {
+                        if r.response.clicked() {
+                            // Snap to a nearby peak, zero or valley of the top curve (Alt: no snapping).
+                            let tol = 10.0 * r.transform.dvalue_dpos()[0].abs();
+                            match (!alt).then(|| snap(sp, &band, conv, view, c.x, tol, max_mag)).flatten() {
+                                Some((x, kind)) => {
+                                    w0 = conv.to_omega(x);
+                                    snapped = Some(kind);
+                                }
+                                None => {
+                                    w0 = conv.to_omega(c.x);
+                                    snapped = None;
+                                }
+                            }
+                            show_w0 = true;
+                        } else if dragging_marker && hovered {
+                            w0 = conv.to_omega(c.x);
+                            snapped = None;
+                            show_w0 = true;
+                        }
+                    }
+                    marker_px[idx] = Some((r.response.rect, r.transform.position_from_point_x(xw0)));
+                });
             }
         });
-        if let Some(xc) = clicked {
-            self.w0 = conv.to_omega(xc);
-            self.show_w0 = true;
+        if hover_w != prev_hw || hover_t != prev_ht {
+            ui.ctx().request_repaint();
         }
-        if let Some(msg) = self.export.step(ui, plots_rect, "spectrum") {
+        self.heights = heights;
+        self.panel_open = open;
+        self.w0 = w0;
+        self.show_w0 = show_w0;
+        self.t0 = t0;
+        self.show_t0 = show_t0;
+        self.hover_w = hover_w;
+        self.hover_t = hover_t;
+        self.marker_px = marker_px;
+        self.snapped = snapped;
+        self.grab = if down { grab } else { None };
+        if let Some(msg) = self.export.step(ui, view_rect, "spectrum") {
             self.toast = Some((msg, Instant::now()));
         }
     }
+}
+
+/// Grid steps from the 1–2–5 sequence (egui_plot's default jumps by 10,
+/// which can leave a short axis with a single label).
+fn spacer125(input: egui_plot::GridInput) -> Vec<egui_plot::GridMark> {
+    let base = input.base_step_size.max(1e-300);
+    let p = 10f64.powf(base.log10().floor());
+    // Smallest 1/2/5 step above the minimum, then coarser steps that nest.
+    let m = [1.0, 2.0, 5.0, 10.0].into_iter().find(|m| m * p >= base).unwrap_or(10.0);
+    let s0 = m * p;
+    let steps = match m as u32 {
+        1 | 10 => [s0, 5.0 * s0, 10.0 * s0],
+        2 => [s0, 5.0 * s0, 10.0 * s0],
+        _ => [s0, 2.0 * s0, 10.0 * s0],
+    };
+    let (lo, hi) = input.bounds;
+    let mut marks = Vec::new();
+    let mut v = (lo / steps[0]).floor() * steps[0];
+    while v <= hi && marks.len() < 2000 {
+        let step = steps.iter().rev().find(|s| ((v / **s).round() * **s - v).abs() < 1e-9 * **s).copied().unwrap_or(steps[0]);
+        marks.push(egui_plot::GridMark { value: v, step_size: step });
+        v += steps[0];
+    }
+    marks
+}
+
+/// Header + body height + bottom grip, outside the panel frame.
+const PANEL_CHROME: f32 = 66.0;
+/// Height of a folded panel.
+const PANEL_CLOSED: f32 = 50.0;
+const MIN_H: f32 = 90.0;
+
+/// A plot panel: a header (click to fold; readout on the right), the body
+/// at `height`, and a grip below it to drag the height.
+fn panel(ui: &mut Ui, t: &Tokens, title: &str, readout: &str, height: &mut f32, open: &mut bool, body: impl FnOnce(&mut Ui, f32)) {
+    egui::Frame::new().fill(t.card).stroke(Stroke::new(1.0, t.card_border)).corner_radius(10).inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 6 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let row = egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 26.0));
+        let resp = ui.interact(row, ui.scope_id().with(("panel", title)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            ui.painter().rect_filled(row, 6, t.accent_soft.gamma_multiply(0.6));
+        }
+        if resp.clicked() {
+            *open = !*open;
+        }
+        ui.allocate_ui_with_layout(row.size(), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_size(row.size());
+            ui.add_space(4.0);
+            let arrow = if crate::ui::theme::icons_available() {
+                if *open { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT }
+            } else if *open {
+                "▾"
+            } else {
+                "▸"
+            };
+            ui.add(egui::Label::new(RichText::new(arrow).color(t.faint)).selectable(false));
+            ui.add(egui::Label::new(RichText::new(title).strong().color(t.text)).selectable(false));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(RichText::new(readout).monospace().size(12.5).color(t.accent_text)).selectable(false).truncate());
+            });
+        });
+        if *open {
+            ui.add_space(2.0);
+            body(ui, *height);
+        }
+    });
+    if *open {
+        // Grip: drag to change the height.
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), egui::Sense::drag());
+        let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(tr("Drag to resize", "拖动调整高度"));
+        if resp.dragged() {
+            *height = (*height + resp.drag_delta().y).clamp(MIN_H, 1600.0);
+        }
+        let c = if resp.hovered() || resp.dragged() { t.accent } else { t.faint.gamma_multiply(0.6) };
+        let mid = r.center();
+        ui.painter().line_segment([mid - vec2(22.0, 0.0), mid + vec2(22.0, 0.0)], Stroke::new(3.0, c));
+    } else {
+        ui.add_space(6.0);
+    }
+}
+
+/// Nearest local extremum of the top curve within `tol` of x, refined by a
+/// golden-section search on the exact transform. Returns (x, kind).
+#[allow(clippy::too_many_arguments)]
+fn snap(sp: &Spectrum, band: &[(f64, C64)], conv: Convention, view: View, x: f64, tol: f64, max_mag: f64) -> Option<(f64, &'static str)> {
+    let q = |v: C64| if view == View::MagPhase { v.norm() } else { v.re };
+    let xs: Vec<f64> = band.iter().map(|(om, _)| conv.from_omega(*om)).collect();
+    let qs: Vec<f64> = band.iter().map(|(_, v)| q(*v)).collect();
+    let mut best: Option<(usize, bool)> = None;
+    for i in 1..qs.len().saturating_sub(1) {
+        let is_max = qs[i] >= qs[i - 1] && qs[i] > qs[i + 1];
+        let is_min = qs[i] <= qs[i - 1] && qs[i] < qs[i + 1];
+        if (is_max || is_min) && (xs[i] - x).abs() <= tol && best.is_none_or(|(b, _)| (xs[i] - x).abs() < (xs[b] - x).abs()) {
+            best = Some((i, is_max));
+        }
+    }
+    let (i, is_max) = best?;
+    // Golden-section on [x_{i-1}, x_{i+1}] for the extremum of q(F(x)).
+    let g = |x: f64| {
+        let v = q(sp.at(conv.to_omega(x)));
+        if is_max { -v } else { v }
+    };
+    let (mut a, mut b) = (xs[i - 1], xs[i + 1]);
+    let phi = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut c, mut d) = (b - phi * (b - a), a + phi * (b - a));
+    let (mut gc, mut gd) = (g(c), g(d));
+    for _ in 0..60 {
+        if gc < gd {
+            b = d;
+            d = c;
+            gd = gc;
+            c = b - phi * (b - a);
+            gc = g(c);
+        } else {
+            a = c;
+            c = d;
+            gc = gd;
+            d = a + phi * (b - a);
+            gd = g(d);
+        }
+    }
+    let xm = (a + b) / 2.0;
+    let kind = if is_max {
+        tr("peak", "峰值")
+    } else if view == View::MagPhase && sp.at(conv.to_omega(xm)).norm() < 1e-6 * max_mag {
+        tr("zero", "零点")
+    } else {
+        tr("valley", "谷值")
+    };
+    Some((xm, kind))
 }
