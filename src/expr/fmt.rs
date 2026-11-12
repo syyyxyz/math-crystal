@@ -29,7 +29,7 @@ pub fn format_num(v: f64) -> String {
     format!("{v:.5e}")
 }
 
-fn un_name(op: Un) -> &'static str {
+pub fn un_name(op: Un) -> &'static str {
     match op {
         Un::Neg => "-",
         Un::Sin => "sin",
@@ -190,6 +190,205 @@ impl Pool {
                 s.push_str(sym);
                 self.write_min(s, b, rp, vars);
             }
+        }
+    }
+}
+
+fn latex_num(v: f64) -> String {
+    // More digits than the on-screen text: copied LaTeX should be exact enough.
+    let a = v.abs();
+    let s = if v.is_finite() && v.fract() != 0.0 && (1e-4..1e6).contains(&a) && format_num(v).parse::<f64>().is_ok() {
+        let t = format!("{v:.10}");
+        t.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else if v.is_finite() && v.fract() != 0.0 && !(1e-4..1e6).contains(&a) {
+        format!("{v:.9e}")
+    } else {
+        format_num(v)
+    };
+    match s.as_str() {
+        "pi" => return "\\pi".into(),
+        "-pi" => return "-\\pi".into(),
+        "inf" => return "\\infty".into(),
+        "-inf" => return "-\\infty".into(),
+        _ => {}
+    }
+    if let Some((m, e)) = s.split_once('e')
+        && let Ok(e) = e.parse::<i32>()
+    {
+        let m = m.trim_end_matches('0').trim_end_matches('.');
+        return format!("{m} \\times 10^{{{e}}}");
+    }
+    s
+}
+
+fn latex_un(op: Un) -> &'static str {
+    match op {
+        Un::Sin => "\\sin",
+        Un::Cos => "\\cos",
+        Un::Tan => "\\tan",
+        Un::Asin => "\\arcsin",
+        Un::Acos => "\\arccos",
+        Un::Atan => "\\arctan",
+        Un::Sinh => "\\sinh",
+        Un::Cosh => "\\cosh",
+        Un::Tanh => "\\tanh",
+        Un::Asinh => "\\operatorname{asinh}",
+        Un::Acosh => "\\operatorname{acosh}",
+        Un::Atanh => "\\operatorname{atanh}",
+        Un::Ln => "\\ln",
+        Un::Sign => "\\operatorname{sgn}",
+        Un::Round => "\\operatorname{round}",
+        Un::Step => "\\operatorname{step}",
+        Un::Sinc => "\\operatorname{sinc}",
+        Un::Re => "\\operatorname{Re}",
+        Un::Im => "\\operatorname{Im}",
+        Un::Arg => "\\arg",
+        _ => "",
+    }
+}
+
+impl Pool {
+    /// LaTeX for an expression (re-readable by [`super::latex::to_plain`]).
+    pub fn to_latex(&self, id: Id, vars: &[&str]) -> String {
+        let mut s = String::new();
+        self.tex(&mut s, id, vars);
+        s
+    }
+
+    fn tex_min(&self, s: &mut String, id: Id, min: u8, vars: &[&str]) {
+        if self.prec(id) < min {
+            s.push_str("\\left(");
+            self.tex(s, id, vars);
+            s.push_str("\\right)");
+        } else {
+            self.tex(s, id, vars);
+        }
+    }
+
+    fn tex_call(&self, s: &mut String, name: &str, args: &[Id], vars: &[&str]) {
+        s.push_str(name);
+        s.push_str("\\left(");
+        for (k, &a) in args.iter().enumerate() {
+            if k > 0 {
+                s.push_str(", ");
+            }
+            self.tex(s, a, vars);
+        }
+        s.push_str("\\right)");
+    }
+
+    fn tex(&self, s: &mut String, id: Id, vars: &[&str]) {
+        match self.node(id) {
+            Node::Const(b) => s.push_str(&latex_num(f64::from_bits(b))),
+            Node::Var(v) => s.push_str(vars.get(v as usize).copied().unwrap_or("?")),
+            Node::I => s.push('i'),
+            Node::If(c, a, b) => {
+                s.push_str("\\begin{cases} ");
+                self.tex(s, a, vars);
+                s.push_str(" & \\text{if } ");
+                self.tex(s, c, vars);
+                s.push_str(" \\\\ ");
+                self.tex(s, b, vars);
+                s.push_str(" & \\text{otherwise} \\end{cases}");
+            }
+            Node::Un(Un::Neg, a) => {
+                s.push('-');
+                self.tex_min(s, a, P_MUL, vars);
+            }
+            Node::Un(Un::Abs, a) => {
+                s.push_str("\\left|");
+                self.tex(s, a, vars);
+                s.push_str("\\right|");
+            }
+            Node::Un(Un::Sqrt, a) => {
+                s.push_str("\\sqrt{");
+                self.tex(s, a, vars);
+                s.push('}');
+            }
+            Node::Un(Un::Cbrt, a) => {
+                s.push_str("\\sqrt[3]{");
+                self.tex(s, a, vars);
+                s.push('}');
+            }
+            Node::Un(Un::Exp, a) => {
+                s.push_str("e^{");
+                self.tex(s, a, vars);
+                s.push('}');
+            }
+            Node::Un(Un::Floor, a) => {
+                s.push_str("\\lfloor ");
+                self.tex(s, a, vars);
+                s.push_str(" \\rfloor");
+            }
+            Node::Un(Un::Ceil, a) => {
+                s.push_str("\\lceil ");
+                self.tex(s, a, vars);
+                s.push_str(" \\rceil");
+            }
+            Node::Un(Un::Conj, a) => {
+                s.push_str("\\overline{");
+                self.tex(s, a, vars);
+                s.push('}');
+            }
+            Node::Un(Un::Not, a) => {
+                s.push_str("\\lnot ");
+                self.tex_min(s, a, P_ATOM, vars);
+            }
+            Node::Un(op, a) => self.tex_call(s, latex_un(op), &[a], vars),
+            Node::Bin(op, a, b) => match op {
+                Bin::Div => {
+                    s.push_str("\\frac{");
+                    self.tex(s, a, vars);
+                    s.push_str("}{");
+                    self.tex(s, b, vars);
+                    s.push('}');
+                }
+                Bin::Pow => {
+                    self.tex_min(s, a, P_ATOM, vars);
+                    s.push_str("^{");
+                    self.tex(s, b, vars);
+                    s.push('}');
+                }
+                Bin::Mul => {
+                    self.tex_min(s, a, P_MUL, vars);
+                    // 2x reads better than 2 \cdot x.
+                    let juxtapose = self.as_const(a).is_some_and(|c| c >= 0.0) && self.as_const(b).is_none() && !matches!(self.node(b), Node::Bin(Bin::Mul | Bin::Div, ..));
+                    s.push_str(if juxtapose { " " } else { " \\cdot " });
+                    self.tex_min(s, b, P_NEG + 1, vars);
+                }
+                Bin::Mod => self.tex_call(s, "\\operatorname{mod}", &[a, b], vars),
+                Bin::Atan2 => self.tex_call(s, "\\operatorname{atan2}", &[a, b], vars),
+                Bin::Min => self.tex_call(s, "\\min", &[a, b], vars),
+                Bin::Max => self.tex_call(s, "\\max", &[a, b], vars),
+                _ => {
+                    let (a, b) = if matches!(op, Bin::Eq | Bin::Ne) && self.as_const(a).is_some() && self.as_const(b).is_none() { (b, a) } else { (a, b) };
+                    let (sym, lp, rp) = match op {
+                        Bin::Or => (" \\lor ", P_OR, P_AND),
+                        Bin::And => (" \\land ", P_AND, P_CMP),
+                        Bin::Lt => (" < ", P_ADD, P_ADD),
+                        Bin::Le => (" \\le ", P_ADD, P_ADD),
+                        Bin::Gt => (" > ", P_ADD, P_ADD),
+                        Bin::Ge => (" \\ge ", P_ADD, P_ADD),
+                        Bin::Eq => (" = ", P_ADD, P_ADD),
+                        Bin::Ne => (" \\ne ", P_ADD, P_ADD),
+                        Bin::Add => (" + ", P_ADD, P_ADD),
+                        Bin::Sub => (" - ", P_ADD, P_MUL),
+                        _ => unreachable!(),
+                    };
+                    if op == Bin::Add
+                        && let Some(c) = self.as_const(b)
+                        && c < 0.0
+                    {
+                        self.tex_min(s, a, lp, vars);
+                        s.push_str(" - ");
+                        s.push_str(&latex_num(-c));
+                        return;
+                    }
+                    self.tex_min(s, a, lp, vars);
+                    s.push_str(sym);
+                    self.tex_min(s, b, rp, vars);
+                }
+            },
         }
     }
 }

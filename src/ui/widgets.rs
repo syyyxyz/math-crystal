@@ -4,56 +4,83 @@ use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, Response, RichT
 
 use super::theme::{Tokens, tokens};
 
-/// A rounded card with a title row. `right` adds widgets at the right end
-/// of the title row. `collapsible: Some(default_open)` makes the title
-/// toggle the body; the state is remembered by `id`.
+/// A rounded, collapsible card. Clicking anywhere on the title row toggles
+/// the body; `right` adds widgets at the right end of the title row (they
+/// take their own clicks). The open state is kept by `id` for the session.
 pub fn card<R>(
     ui: &mut Ui,
     id: &str,
     icon: &str,
     title: &str,
-    collapsible: Option<bool>,
+    default_open: bool,
     right: impl FnOnce(&mut Ui),
     body: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
     let t = tokens(ui.ctx());
     let mut out = None;
+    let state_id = ui.make_persistent_id(("card", id));
+    // Not persisted: every start begins with the default (mostly folded) layout.
+    let mut open = ui.ctx().data_mut(|d| *d.get_temp_mut_or(state_id, default_open));
     Frame::new()
         .fill(t.card)
         .stroke(Stroke::new(1.0, t.card_border))
         .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 12 })
+        .inner_margin(Margin { left: 6, right: 8, top: 4, bottom: if open { 12 } else { 4 } })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let state_id = ui.make_persistent_id(("card", id));
-            let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(state_id, collapsible.unwrap_or(true)));
-            let collapsible = collapsible.is_some();
-            ui.horizontal(|ui| {
-                let label = super::theme::with_icon(icon, title);
-                let text = RichText::new(label).size(14.5).strong().color(t.text);
-                let resp = if collapsible {
-                    let arrow = if open { "▾" } else { "▸" };
-                    ui.add(egui::Label::new(RichText::new(arrow).color(t.faint)).sense(Sense::click()))
-                        .union(ui.add(egui::Label::new(text).sense(Sense::click())))
+            let row = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 30.0));
+            let resp = ui.interact(row, state_id.with("header"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.hovered() {
+                ui.painter().rect_filled(row, CornerRadius::same(7), t.accent_soft.gamma_multiply(0.6));
+            }
+            if resp.clicked() {
+                open = !open;
+                ui.ctx().data_mut(|d| d.insert_temp(state_id, open));
+            }
+            ui.allocate_ui_with_layout(row.size(), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(row.size());
+                ui.add_space(4.0);
+                let arrow = if super::theme::icons_available() {
+                    if open { super::theme::icon::CHEVRON_DOWN } else { super::theme::icon::CHEVRON_RIGHT }
+                } else if open {
+                    "▾"
                 } else {
-                    ui.label(text)
+                    "▸"
                 };
-                if collapsible && resp.clicked() {
-                    open = !open;
-                    ui.ctx().data_mut(|d| d.insert_persisted(state_id, open));
-                }
-                if collapsible {
-                    resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                }
+                ui.add(egui::Label::new(RichText::new(arrow).color(t.faint)).selectable(false));
+                let label = super::theme::with_icon(icon, title);
+                ui.add(egui::Label::new(RichText::new(label).size(14.0).strong().color(if open { t.text } else { t.muted })).selectable(false));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
             });
-            if open || !collapsible {
+            if open {
                 ui.add_space(4.0);
-                out = Some(body(ui));
+                // Body aligned with the title text, not the chevron.
+                egui::Frame::new().inner_margin(Margin { left: 6, right: 4, top: 0, bottom: 0 }).show(ui, |ui| {
+                    out = Some(body(ui));
+                });
             }
         });
-    ui.add_space(8.0);
+    ui.add_space(5.0);
     out
+}
+
+/// Compact "show in the view" toggle (eye icon). Returns true when changed.
+pub fn eye(ui: &mut Ui, on: &mut bool, tip: &str) -> bool {
+    let t = tokens(ui.ctx());
+    if !super::theme::icons_available() {
+        return ui.checkbox(on, "").on_hover_text(tip).changed();
+    }
+    let ic = if *on { super::theme::icon::EYE } else { super::theme::icon::EYE_OFF };
+    let color = if *on { t.accent_text } else { t.faint };
+    let resp = ui
+        .add(egui::Button::new(RichText::new(ic).size(16.0).color(color)).frame(false).min_size(Vec2::new(26.0, 22.0)))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip);
+    if resp.clicked() {
+        *on = !*on;
+        return true;
+    }
+    false
 }
 
 /// Toggle chip with an optional colour swatch; returns the response.

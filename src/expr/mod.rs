@@ -9,6 +9,7 @@
 pub mod diff;
 pub mod eval;
 pub mod fmt;
+pub mod latex;
 pub mod parse;
 
 use std::collections::HashMap;

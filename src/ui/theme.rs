@@ -14,6 +14,11 @@ pub mod icon {
     pub const HELP: &str = "\u{F0625}";
     pub const FUNCTION: &str = "\u{F0871}";
     pub const CHEVRON_DOWN: &str = "\u{F0140}";
+    pub const CHEVRON_RIGHT: &str = "\u{F0142}";
+    pub const CHEVRON_UP: &str = "\u{F0143}";
+    pub const EYE: &str = "\u{F0208}";
+    pub const EYE_OFF: &str = "\u{F0209}";
+    pub const TRANSLATE: &str = "\u{F05CA}";
     pub const CHECK: &str = "\u{F05E0}";
     pub const ALERT: &str = "\u{F0028}";
     pub const CROSSHAIRS: &str = "\u{F01A4}";
@@ -62,12 +67,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut prop: Vec<String> = Vec::new();
     let mut mono: Vec<String> = Vec::new();
     // (name, paths, proportional, monospace)
-    let candidates: [(&str, &[&str], bool, bool); 5] = [
+    let candidates: [(&str, &[&str], bool, bool); 6] = [
         ("Inter", &["/usr/share/fonts/inter/InterVariable.ttf", "/usr/share/fonts/TTF/Inter-Regular.ttf"], true, false),
         ("JetBrainsMono", &["/usr/share/fonts/TTF/JetBrainsMonoNLNerdFontMono-Regular.ttf", "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf", "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"], false, true),
         ("DejaVuSans", &["/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"], true, false),
         ("DejaVuSansMono", &["/usr/share/fonts/TTF/DejaVuSansMono.ttf"], false, true),
         ("NerdSymbols", &["/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf"], true, true),
+        // Chinese interface text.
+        ("CJK", &["/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf", "/usr/share/fonts/adobe-source-han-sans/SourceHanSansSC-Regular.otf", "/usr/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf", "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc"], true, true),
     ];
     let mut icons = false;
     for (name, paths, for_prop, for_mono) in candidates {

@@ -115,6 +115,16 @@ impl Surface {
         self.pool.to_string(self.ids[which], &VARS)
     }
 
+    /// LaTeX of f (0) or a derivative (1..=6, as in [`Self::formula`]).
+    pub fn formula_latex(&self, which: usize) -> String {
+        self.pool.to_latex(self.ids[which], &VARS)
+    }
+
+    /// The expression pool and the id of f (0) or a derivative (1..=6).
+    pub fn expr(&self, which: usize) -> (&Pool, Id) {
+        (&self.pool, self.ids[which])
+    }
+
     pub fn formula_len(&self, which: usize) -> usize {
         Program::compile(&self.pool, &[self.ids[which]]).len()
     }

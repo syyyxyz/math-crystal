@@ -1,5 +1,6 @@
 //! Math-crystal core library (UI-independent parts).
 pub mod expr;
+pub mod i18n;
 pub mod calc;
 pub mod render;
 pub mod calc_view;

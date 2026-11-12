@@ -14,6 +14,8 @@ fn main() {
         .wgpu()
         .build_eframe(|cc| MathCrystal::new(cc));
     h.ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
+    let zh = std::env::args().any(|a| a == "--zh");
+    math_crystal::i18n::set_zh(zh);
     let classic = std::env::args().any(|a| a == "--classic");
     if classic {
         let c = h.state_mut().calc_mut();
@@ -28,7 +30,7 @@ fn main() {
     }
     h.run_steps(4);
     let img = h.render().expect("render");
-    let path = dir.join(format!("ui{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }));
+    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }));
     img.save(&path).unwrap();
     eprintln!("wrote {}", path.display());
 }

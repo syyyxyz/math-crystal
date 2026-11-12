@@ -1,4 +1,5 @@
 //! Design system: theme tokens, fonts and custom widgets.
+pub mod mathview;
 pub mod theme;
 pub mod widgets;
 

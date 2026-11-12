@@ -207,7 +207,7 @@ pub fn draw(ui: &mut Ui, rect: Rect, inp: &MapInput, cache: &mut MapCache, t: &T
     {
         let (x, y) = to_data(h);
         let f = surf.f(x, y);
-        let txt = format!("x = {}\ny = {}\nf = {}", short(x), short(y), if f.is_finite() { short(f) } else { "undefined".into() });
+        let txt = format!("x = {}\ny = {}\nf = {}", short(x), short(y), if f.is_finite() { short(f) } else { crate::i18n::tr("undefined", "无定义").into() });
         tooltip(&painter, h + Vec2::new(14.0, 14.0), &txt, t);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }

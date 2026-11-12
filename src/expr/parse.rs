@@ -6,6 +6,7 @@
 //! `-(x^2)` and `2^-x` works), then atoms.
 
 use super::{Bin, Id, Pool, Un, Vars};
+use crate::i18n::{tr, zh};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -16,7 +17,10 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (at column {})", self.msg, self.pos + 1)
+        // LaTeX errors carry no column.
+        if self.pos == usize::MAX {
+            write!(f, "{}", self.msg)
+        } else if zh() { write!(f, "{}（第 {} 列）", self.msg, self.pos + 1) } else { write!(f, "{} (at column {})", self.msg, self.pos + 1) }
     }
 }
 
@@ -58,7 +62,7 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>, ParseError> {
             }
             let text = &src[start..i];
             let v: f64 = text.parse().map_err(|_| ParseError {
-                msg: format!("Bad number '{text}'"),
+                msg: format!("{} '{text}'", tr("Bad number", "无效数字")),
                 pos: start,
             })?;
             out.push((Tok::Num(v), start));
@@ -82,7 +86,7 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>, ParseError> {
         ];
         let Some(op) = OPS.iter().find(|op| src[i..].starts_with(**op)) else {
             return Err(ParseError {
-                msg: format!("Unexpected character '{c}'"),
+                msg: format!("{} '{c}'", tr("Unexpected character", "无法识别的字符")),
                 pos: start,
             });
         };
@@ -113,10 +117,19 @@ const MAX_DEPTH: usize = 200;
 
 /// Parse `src` into `pool`. `allow_i` enables the imaginary unit `i`.
 pub fn parse(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool) -> Result<Id, ParseError> {
+    // LaTeX is translated first; error columns then refer to the translation,
+    // which the UI shows next to the input.
+    let translated;
+    let src = if super::latex::looks_like_latex(src) {
+        translated = super::latex::to_plain(src)?;
+        translated.as_str()
+    } else {
+        super::latex::strip_lhs(src)
+    };
     let toks = lex(src)?;
     if toks.len() == 1 {
         return Err(ParseError {
-            msg: "Expression is empty".into(),
+            msg: tr("Expression is empty", "表达式为空").into(),
             pos: 0,
         });
     }
@@ -131,17 +144,17 @@ pub fn parse(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool) -> Result<I
     let id = p.or()?;
     match p.peek() {
         Tok::End => Ok(id),
-        Tok::Op(")") => Err(p.err("Unmatched ')'")),
-        t => Err(p.err(&format!("Unexpected {}", describe(t)))),
+        Tok::Op(")") => Err(p.err(tr("Unmatched ')'", "多余的 ')'"))),
+        t => Err(p.err(&format!("{} {}", tr("Unexpected", "多余的"), describe(t)))),
     }
 }
 
 fn describe(t: &Tok) -> String {
     match t {
-        Tok::Num(v) => format!("number {v}"),
-        Tok::Ident(s) => format!("name '{s}'"),
+        Tok::Num(v) => format!("{} {v}", tr("number", "数字")),
+        Tok::Ident(s) => format!("{} '{s}'", tr("name", "名称")),
         Tok::Op(o) => format!("'{o}'"),
-        Tok::End => "end of input".into(),
+        Tok::End => tr("end of input", "输入结尾").into(),
     }
 }
 
@@ -183,14 +196,14 @@ impl Parser<'_> {
         if self.eat_op(op) {
             Ok(())
         } else {
-            Err(self.err(&format!("Expected '{op}', found {}", describe(self.peek()))))
+            Err(self.err(&format!("{} '{op}', {} {}", tr("Expected", "此处应为"), tr("found", "实际为"), describe(self.peek()))))
         }
     }
 
     fn enter(&mut self) -> Result<(), ParseError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            Err(self.err("Expression is nested too deeply"))
+            Err(self.err(tr("Expression is nested too deeply", "表达式嵌套过深")))
         } else {
             Ok(())
         }
@@ -320,7 +333,7 @@ impl Parser<'_> {
     fn args(&mut self, name: &str, pos: usize) -> Result<Vec<Id>, ParseError> {
         if !self.eat_op("(") {
             return Err(ParseError {
-                msg: format!("Function '{name}' needs parentheses, e.g. {name}(x)"),
+                msg: format!("{} '{name}' {} {name}(x)", tr("Function", "函数"), tr("needs parentheses, e.g.", "需要括号，例如")),
                 pos,
             });
         }
@@ -362,7 +375,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 self.ident(&name, pos)
             }
-            t => Err(self.err(&format!("Unexpected {}", describe(&t)))),
+            t => Err(self.err(&format!("{} {}", tr("Unexpected", "多余的"), describe(&t)))),
         }
     }
 
@@ -384,14 +397,14 @@ impl Parser<'_> {
                     .all(|c| self.vars.index(&c.to_string()).is_some())
             {
                 let parts: Vec<String> = name.chars().map(String::from).collect();
-                format!(" (write {} for a product)", parts.join("*"))
+                format!(" ({} {})", tr("for a product write", "乘积请写成"), parts.join("*"))
             } else if (name == "i" || name == "j") && !self.allow_i {
-                " (complex numbers are only available in the Complex workspace)".to_string()
+                tr(" (complex numbers are only available in the Complex workspace)", "（复数只能在“复变函数”工作区使用）").to_string()
             } else {
-                format!(" (variables here: {})", self.vars.0.join(", "))
+                format!(" ({}: {})", tr("variables here", "可用变量"), self.vars.0.join(", "))
             };
             return Err(ParseError {
-                msg: format!("Unknown name '{name}'{hint}"),
+                msg: format!("{} '{name}'{hint}", tr("Unknown name", "未知名称")),
                 pos,
             });
         };
@@ -399,10 +412,10 @@ impl Parser<'_> {
         if !spec.arity.contains(&args.len()) {
             let want = match (spec.arity.start(), spec.arity.end()) {
                 (a, b) if a == b => format!("{a}"),
-                (a, b) => format!("{a} to {b}"),
+                (a, b) => format!("{a}{}{b}", tr(" to ", "~")),
             };
             return Err(ParseError {
-                msg: format!("'{name}' takes {want} argument(s), got {}", args.len()),
+                msg: if zh() { format!("'{name}' 需要 {want} 个参数，实际 {} 个", args.len()) } else { format!("'{name}' takes {want} argument(s), got {}", args.len()) },
                 pos,
             });
         }

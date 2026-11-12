@@ -69,10 +69,10 @@ pub enum CriticalKind {
 impl CriticalKind {
     pub fn name(self) -> &'static str {
         match self {
-            CriticalKind::Minimum => "minimum",
-            CriticalKind::Maximum => "maximum",
-            CriticalKind::Saddle => "saddle",
-            CriticalKind::Degenerate => "degenerate",
+            CriticalKind::Minimum => crate::i18n::tr("minimum", "极小值"),
+            CriticalKind::Maximum => crate::i18n::tr("maximum", "极大值"),
+            CriticalKind::Saddle => crate::i18n::tr("saddle", "鞍点"),
+            CriticalKind::Degenerate => crate::i18n::tr("degenerate", "退化"),
         }
     }
 }
