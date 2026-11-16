@@ -55,8 +55,19 @@ struct GpuMesh {
     vbuf: wgpu::Buffer,
     ibuf: wgpu::Buffer,
     count: u32,
-    translucent: bool,
-    centroid: Vec3,
+}
+
+/// All translucent meshes merged into one buffer whose triangles are
+/// re-sorted far to near whenever the camera moves, so that surfaces
+/// passing through each other (and the back of a closed surface) blend in
+/// the right order.
+struct Translucent {
+    vbuf: wgpu::Buffer,
+    ibuf: wgpu::Buffer,
+    tris: Vec<[u32; 3]>,
+    centroids: Vec<Vec3>,
+    /// Camera (eye, ortho flag) the index buffer is sorted for.
+    sorted_for: Option<(Vec3, Vec3, bool)>,
 }
 
 pub struct Gpu3d {
@@ -67,6 +78,7 @@ pub struct Gpu3d {
     bind: wgpu::BindGroup,
     target: Option<Target>,
     meshes: Vec<GpuMesh>,
+    translucent_batch: Option<Translucent>,
     line_buf: Option<wgpu::Buffer>,
     line_count: u32,
 }
@@ -167,6 +179,7 @@ impl Gpu3d {
             bind,
             target: None,
             meshes: Vec::new(),
+            translucent_batch: None,
             line_buf: None,
             line_count: 0,
         }
@@ -175,7 +188,7 @@ impl Gpu3d {
     pub fn set_meshes(&mut self, device: &wgpu::Device, meshes: &[MeshData]) {
         self.meshes = meshes
             .iter()
-            .filter(|m| !m.indices.is_empty())
+            .filter(|m| !m.indices.is_empty() && !m.translucent)
             .map(|m| GpuMesh {
                 vbuf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("mesh vertices"),
@@ -188,10 +201,36 @@ impl Gpu3d {
                     usage: wgpu::BufferUsages::INDEX,
                 }),
                 count: m.indices.len() as u32,
-                translucent: m.translucent,
-                centroid: m.centroid(),
             })
             .collect();
+        let mut vertices: Vec<MeshVertex> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for m in meshes.iter().filter(|m| !m.indices.is_empty() && m.translucent) {
+            let base = vertices.len() as u32;
+            vertices.extend_from_slice(&m.vertices);
+            tris.extend(m.indices.chunks_exact(3).map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+        }
+        self.translucent_batch = (!tris.is_empty()).then(|| {
+            let centroids = tris
+                .iter()
+                .map(|t| t.iter().map(|&k| Vec3::from(vertices[k as usize].pos)).sum::<Vec3>() / 3.0)
+                .collect();
+            Translucent {
+                vbuf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("translucent vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                ibuf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("translucent indices"),
+                    contents: bytemuck::cast_slice(&tris),
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                }),
+                tris,
+                centroids,
+                sorted_for: None,
+            }
+        });
     }
 
     pub fn set_lines(&mut self, device: &wgpu::Device, lines: &[LineInstance]) {
@@ -319,9 +358,9 @@ impl Gpu3d {
                 pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..m.count, 0, 0..1);
             };
-            // Opaque meshes, then lines, then translucent meshes far to near.
+            // Opaque meshes, then lines, then translucent triangles far to near.
             pass.set_pipeline(&self.opaque);
-            for m in self.meshes.iter().filter(|m| !m.translucent) {
+            for m in &self.meshes {
                 draw(&mut pass, m);
             }
             if let Some(buf) = &self.line_buf {
@@ -329,12 +368,27 @@ impl Gpu3d {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..6, 0..self.line_count);
             }
-            let eye = cam.eye();
-            let mut trans: Vec<&GpuMesh> = self.meshes.iter().filter(|m| m.translucent).collect();
-            trans.sort_by(|a, b| b.centroid.distance_squared(eye).total_cmp(&a.centroid.distance_squared(eye)));
-            pass.set_pipeline(&self.translucent);
-            for m in trans {
-                draw(&mut pass, m);
+            if let Some(tb) = &mut self.translucent_batch {
+                let key = (cam.eye(), to_eye, cam.ortho);
+                if tb.sorted_for != Some(key) {
+                    let eye = cam.eye();
+                    // Larger = nearer: distance along the view direction
+                    // (orthographic) or negative distance to the eye.
+                    let depth: Vec<f32> = if cam.ortho {
+                        tb.centroids.iter().map(|c| c.dot(to_eye)).collect()
+                    } else {
+                        tb.centroids.iter().map(|c| -c.distance_squared(eye)).collect()
+                    };
+                    let mut order: Vec<u32> = (0..tb.tris.len() as u32).collect();
+                    order.sort_unstable_by(|&a, &b| depth[a as usize].total_cmp(&depth[b as usize]));
+                    let sorted: Vec<[u32; 3]> = order.iter().map(|&k| tb.tris[k as usize]).collect();
+                    queue.write_buffer(&tb.ibuf, 0, bytemuck::cast_slice(&sorted));
+                    tb.sorted_for = Some(key);
+                }
+                pass.set_pipeline(&self.translucent);
+                pass.set_vertex_buffer(0, tb.vbuf.slice(..));
+                pass.set_index_buffer(tb.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..tb.tris.len() as u32 * 3, 0, 0..1);
             }
         }
         queue.submit([enc.finish()]);

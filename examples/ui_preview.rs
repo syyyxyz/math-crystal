@@ -32,6 +32,14 @@ fn main() {
     if complex {
         h.state_mut().show_complex();
     }
+    let space = std::env::args().any(|a| a == "--space");
+    if space {
+        h.state_mut().show_space();
+    }
+    let args0: Vec<String> = std::env::args().collect();
+    if let Some(k) = args0.iter().position(|a| a == "--scene").and_then(|k| args0.get(k + 1)).and_then(|v| v.parse().ok()) {
+        h.state_mut().space_mut().load_scene(k);
+    }
     let spectrum = std::env::args().any(|a| a == "--spectrum");
     if spectrum {
         h.state_mut().show_spectrum();
@@ -58,7 +66,7 @@ fn main() {
     }
     h.run_steps(4);
     let img = h.render().expect("render");
-    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }).replace("ui", if complex { "complex" } else if spectrum { "spectrum" } else { "ui" }));
+    let path = dir.join(format!("ui{}{}{}.png", if dark { "_dark" } else { "_light" }, if classic { "_classic" } else { "" }, if zh { "_zh" } else { "" }).replace("ui", if space { "space" } else if complex { "complex" } else if spectrum { "spectrum" } else { "ui" }));
     img.save(&path).unwrap();
     eprintln!("wrote {}", path.display());
 }

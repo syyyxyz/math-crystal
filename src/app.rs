@@ -42,6 +42,7 @@ const EXAMPLES: &[(&str, &str, &str)] = &[
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Workspace {
     Calculus,
+    Space,
     Complex,
     Spectrum,
 }
@@ -55,6 +56,7 @@ enum CanvasMode {
 pub struct MathCrystal {
     workspace: Workspace,
     calc: CalcWorkspace,
+    space: crate::space_app::SpaceWorkspace,
     complex: crate::complex_app::ComplexWorkspace,
     spectrum: crate::spectrum_app::SpectrumWorkspace,
     logo: Option<egui::TextureHandle>,
@@ -82,6 +84,7 @@ impl MathCrystal {
         Self {
             workspace: Workspace::Calculus,
             calc: CalcWorkspace::new(DEFAULT_FUNCTION),
+            space: crate::space_app::SpaceWorkspace::default(),
             complex: crate::complex_app::ComplexWorkspace::default(),
             spectrum: crate::spectrum_app::SpectrumWorkspace::default(),
             logo: Some(logo),
@@ -96,6 +99,15 @@ impl MathCrystal {
     /// Show the Spectrum workspace (used by the preview example).
     pub fn show_spectrum(&mut self) {
         self.workspace = Workspace::Spectrum;
+    }
+
+    /// Show the Space workspace (used by the preview example).
+    pub fn show_space(&mut self) {
+        self.workspace = Workspace::Space;
+    }
+
+    pub fn space_mut(&mut self) -> &mut crate::space_app::SpaceWorkspace {
+        &mut self.space
     }
 
     /// Show the Complex workspace (used by the preview example).
@@ -132,6 +144,7 @@ impl MathCrystal {
                         &mut self.workspace,
                         &[
                             (Workspace::Calculus, &with_icon(icon::FUNCTION, tr("Calculus", "多元微积分")), tr("Functions of two variables", "二元函数")),
+                            (Workspace::Space, &with_icon(icon::CUBE, tr("Space", "空间几何")), tr("Surfaces, lines and solids in space", "空间中的曲面、直线与立体")),
                             (Workspace::Complex, &with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions w = f(z)", "复变函数 w = f(z)")),
                             (Workspace::Spectrum, &with_icon(icon::SINE, tr("Spectrum", "频谱")), tr("Fourier transform of an absolutely integrable f(t)", "绝对可积信号 f(t) 的傅里叶变换")),
                         ],
@@ -150,6 +163,7 @@ impl MathCrystal {
                             i18n::set_zh(!i18n::zh());
                             // Error messages come from the parser: re-run it.
                             self.calc.relocalize();
+                            self.space.relocalize();
                             self.complex.relocalize();
                             self.spectrum.relocalize();
                         }
@@ -192,6 +206,15 @@ impl MathCrystal {
                     row(ui, "< <= == != and or", tr("Comparisons; chains like 0 < x < 1", "比较运算；可连写 0 < x < 1"));
                     row(ui, "pi  e  tau", tr("Constants", "常数"));
                     row(ui, "a  k  T  ω", tr("Other letters are parameters with sliders", "其他字母是参数，会出现滑块"));
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new(tr("Space geometry", "空间几何")).strong());
+                egui::Grid::new("help_space").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    row(ui, "x^2 + y^2 = z^2", tr("Surface: any equation in x, y, z (quadrics are named)", "曲面：x、y、z 的任意方程（二次曲面会自动判型）"));
+                    row(ui, "(1+2t, -1+3t, t)", tr("Line or curve, parametric in t", "直线或曲线，参数式（参数 t）"));
+                    row(ui, "(x-1)/2 = (y+1)/3 = z", tr("Line, symmetric form; /0 means that coordinate is fixed", "直线对称式；分母为 0 表示该坐标不变"));
+                    row(ui, "x + y + z = 1, x - y = 0", tr("Line as two planes", "直线一般式（两个平面）"));
+                    row(ui, tr("Red points", "红色的点"), tr("Points of tangency", "切点"));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(tr("Complex functions", "复变函数")).strong());
@@ -250,6 +273,7 @@ impl eframe::App for MathCrystal {
         let ctx = ui.ctx().clone();
         match self.workspace {
             Workspace::Calculus => self.calc.ui(ui, frame),
+            Workspace::Space => self.space.ui(ui, frame),
             Workspace::Complex => self.complex.ui(ui, frame),
             Workspace::Spectrum => self.spectrum.ui(ui, frame),
         }
