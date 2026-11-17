@@ -18,7 +18,7 @@ provides=('math-crystal')
 conflicts=('math-crystal')
 _dir="math-crystal-$pkgver-linux-x86_64"
 source=("$url/releases/download/v$pkgver/$_dir.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('9c9deef470930b8685385959c3e4cb45ba3edc58280c147c4c60212d995d7494')
 
 package() {
   cd "$_dir"

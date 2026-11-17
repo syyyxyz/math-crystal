@@ -1,0 +1,24 @@
+pkgbase = math-crystal-bin
+	pkgdesc = Visual math workbench: multivariable calculus, complex functions, Fourier spectra, space geometry (prebuilt)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/syyyxyz/math-crystal
+	arch = x86_64
+	license = MIT
+	license = OFL-1.1
+	license = Bitstream-Vera
+	depends = gcc-libs
+	depends = glibc
+	depends = libxkbcommon
+	depends = vulkan-icd-loader
+	depends = hicolor-icon-theme
+	optdepends = wayland: Wayland sessions
+	optdepends = libxcursor: X11 sessions
+	optdepends = libxi: X11 sessions
+	optdepends = libxrandr: X11 sessions
+	provides = math-crystal
+	conflicts = math-crystal
+	source = https://github.com/syyyxyz/math-crystal/releases/download/v0.1.0/math-crystal-0.1.0-linux-x86_64.tar.gz
+	sha256sums = 9c9deef470930b8685385959c3e4cb45ba3edc58280c147c4c60212d995d7494
+
+pkgname = math-crystal-bin
