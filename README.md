@@ -23,6 +23,7 @@
 在 [Releases](../../releases) 页面下载：
 
 - **Windows**（10 / 11，64 位）：下载 `math-crystal-<版本>-windows-x86_64.zip`，解压后运行 `math-crystal.exe`。不需要安装，也不需要额外的运行库。程序没有代码签名，第一次运行时 SmartScreen 可能拦截，点「更多信息 → 仍要运行」即可。
+  - 如果启动失败，程序会弹窗显示错误，并把它记在 `%LOCALAPPDATA%\Math-crystal\crash.log`。显卡驱动不支持默认的 DirectX 12 / Vulkan 时，弹窗会提议改用 OpenGL；这个选择记在同一目录的 `backend.txt` 里，删掉它就恢复默认。
 - **Arch Linux**：从 AUR 安装 `math-crystal`（从源码编译）或 `math-crystal-bin`（预编译），例如 `paru -S math-crystal-bin`。
 - **其他 Linux**：下载 `math-crystal-<版本>-linux-x86_64.tar.gz`，解压后直接运行 `math-crystal`；压缩包里附有 `.desktop` 文件和图标。
 
@@ -72,7 +73,7 @@ Linux 上编译需要 `libxkbcommon` 和 `wayland` 的开发文件（Arch 已自
 
 Unknown single letters become parameter sliders (with play). Views export as PNG to `Pictures/Math-crystal`.
 
-**Install** — from [Releases](../../releases): unzip `math-crystal-<version>-windows-x86_64.zip` and run `math-crystal.exe` (the binary is unsigned, so SmartScreen may ask: *More info → Run anyway*); on Arch install `math-crystal` or `math-crystal-bin` from the AUR; on other Linux distributions unpack the `.tar.gz` and run `math-crystal`. A GPU driver with Vulkan, DirectX 12 or OpenGL ES 3 is required. The integrated GPU is used by default; set `WGPU_POWER_PREF=high` to use the discrete one.
+**Install** — from [Releases](../../releases): unzip `math-crystal-<version>-windows-x86_64.zip` and run `math-crystal.exe` (the binary is unsigned, so SmartScreen may ask: *More info → Run anyway*). If it cannot start, it shows the error (also saved to `%LOCALAPPDATA%\Math-crystal\crash.log`) and, when the graphics back end is at fault, offers to restart on OpenGL; that choice is kept in `backend.txt` next to the log — delete it to go back to the default; on Arch install `math-crystal` or `math-crystal-bin` from the AUR; on other Linux distributions unpack the `.tar.gz` and run `math-crystal`. A GPU driver with Vulkan, DirectX 12 or OpenGL ES 3 is required. The integrated GPU is used by default; set `WGPU_POWER_PREF=high` to use the discrete one.
 
 **Build** — Rust 1.85+: `cargo build --release`. On Debian/Ubuntu install `libxkbcommon-dev libwayland-dev` first.
 

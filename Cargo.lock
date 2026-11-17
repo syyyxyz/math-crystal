@@ -1760,7 +1760,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "math-crystal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "dirs",
@@ -1778,6 +1778,7 @@ dependencies = [
  "rustfft",
  "skrifa",
  "wgpu",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

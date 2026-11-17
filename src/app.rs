@@ -263,6 +263,7 @@ impl eframe::App for MathCrystal {
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        crate::FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if ui.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_help = !self.show_help;
         }

@@ -2,7 +2,15 @@
 
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 
+#[cfg(windows)]
+mod startup_win;
+
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    {
+        startup_win::apply_saved_backend();
+        startup_win::install_panic_hook();
+    }
     env_logger::init();
     // A few threads are plenty for grid sampling and keep the laptop cool.
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
@@ -25,7 +33,12 @@ fn main() -> eframe::Result {
         },
         ..Default::default()
     };
-    eframe::run_native("Math-crystal", options, Box::new(|cc| Ok(Box::new(math_crystal::app::MathCrystal::new(cc)))))
+    let result = eframe::run_native("Math-crystal", options, Box::new(|cc| Ok(Box::new(math_crystal::app::MathCrystal::new(cc)))));
+    #[cfg(windows)]
+    if let Err(e) = &result {
+        startup_win::report(&e.to_string());
+    }
+    result
 }
 
 fn icon() -> egui::IconData {

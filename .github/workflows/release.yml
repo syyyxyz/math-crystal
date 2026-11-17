@@ -35,6 +35,14 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - run: cargo test --locked --lib
       - run: cargo build --locked --release
+      - name: Check the exe needs no Visual C++ runtime
+        if: runner.os == 'Windows'
+        env:
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          dumpbin=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -find '**/Hostx64/x64/dumpbin.exe' | head -1 | tr -d '\r')
+          "$dumpbin" /dependents target/release/math-crystal.exe | tee deps.txt
+          if grep -qiE 'vcruntime|msvcp' deps.txt; then echo "links the VC++ runtime dynamically"; exit 1; fi
       - name: Package
         run: |
           name="math-crystal-$VERSION-${{ matrix.target }}"

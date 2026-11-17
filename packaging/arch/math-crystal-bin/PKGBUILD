@@ -3,7 +3,7 @@
 # `makepkg --printsrcinfo > .SRCINFO`.
 _owner=syyyxyz
 pkgname=math-crystal-bin
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Visual math workbench: multivariable calculus, complex functions, Fourier spectra, space geometry (prebuilt)"
 arch=('x86_64')
