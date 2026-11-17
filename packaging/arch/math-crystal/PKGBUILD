@@ -16,7 +16,7 @@ optdepends=('wayland: Wayland sessions'
             'libxrandr: X11 sessions')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('2b803ab08a85aa721034d4c24f74800e9db6868c0dfde83d670056f32c15e16b')
+sha256sums=('6d9747e7f45bd344ff46898b61154c401fd6d2c60d61569997270855a4af82fd')
 
 prepare() {
   cd "$pkgname-$pkgver"

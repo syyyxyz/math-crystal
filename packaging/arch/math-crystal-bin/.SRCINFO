@@ -1,6 +1,6 @@
 pkgbase = math-crystal-bin
 	pkgdesc = Visual math workbench: multivariable calculus, complex functions, Fourier spectra, space geometry (prebuilt)
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/syyyxyz/math-crystal
 	arch = x86_64
@@ -18,7 +18,7 @@ pkgbase = math-crystal-bin
 	optdepends = libxrandr: X11 sessions
 	provides = math-crystal
 	conflicts = math-crystal
-	source = https://github.com/syyyxyz/math-crystal/releases/download/v0.1.0/math-crystal-0.1.0-linux-x86_64.tar.gz
-	sha256sums = 9c9deef470930b8685385959c3e4cb45ba3edc58280c147c4c60212d995d7494
+	source = https://github.com/syyyxyz/math-crystal/releases/download/v0.1.1/math-crystal-0.1.1-linux-x86_64.tar.gz
+	sha256sums = 04f1b0d172e8670c232c35410da144de527d0c523522d629f04ebbada880139e
 
 pkgname = math-crystal-bin
