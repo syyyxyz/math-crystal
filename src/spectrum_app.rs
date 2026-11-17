@@ -801,7 +801,7 @@ impl SpectrumWorkspace {
                     if ui.button(with_icon(icon::RESTORE, "")).on_hover_text(tr("Reset the plot ranges", "重置坐标范围")).clicked() {
                         self.reset_plots = true;
                     }
-                    if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(tr("Save the plots as PNG in ~/Pictures/Math-crystal", "把图保存为 PNG（~/Pictures/Math-crystal）")).clicked() {
+                    if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(crate::ui::export::hint(tr("Save the plots as PNG in", "把图保存为 PNG，位置："))).clicked() {
                         self.export.start();
                     }
                 });

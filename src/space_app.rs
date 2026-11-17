@@ -533,7 +533,7 @@ impl SpaceWorkspace {
         let mut top_right = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::right_to_left(Align::Min)));
         let toolbar = overlay_frame(t).inner_margin(egui::Margin::same(5)).show(&mut top_right, |ui| {
             ui.horizontal(|ui| {
-                if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(tr("Save the view as PNG in ~/Pictures/Math-crystal", "把视图保存为 PNG（~/Pictures/Math-crystal）")).clicked() {
+                if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(crate::ui::export::hint(tr("Save the view as PNG in", "把视图保存为 PNG，位置："))).clicked() {
                     self.export.start();
                 }
                 self.view.projection_controls(ui);

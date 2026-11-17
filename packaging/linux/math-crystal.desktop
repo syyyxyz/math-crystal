@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Math-crystal
+Comment=Visual math workbench: multivariable calculus, complex functions, spectra, space geometry
+Comment[zh_CN]=可视化数学工作台：多元微积分、复变函数、频谱、空间几何
+Exec=math-crystal
+Icon=math-crystal
+Terminal=false
+Categories=Education;Science;Math;
+Keywords=calculus;complex;fourier;geometry;plot;
+StartupWMClass=math-crystal

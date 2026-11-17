@@ -1212,7 +1212,7 @@ impl CalcWorkspace {
         overlay_frame(t).inner_margin(egui::Margin::same(5)).show(&mut top_right, |ui| {
             // The parent lays out right-to-left, so add items right-most first.
             ui.horizontal(|ui| {
-                if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(tr("Save the view as PNG in ~/Pictures/Math-crystal", "把视图保存为 PNG（~/Pictures/Math-crystal）")).clicked() {
+                if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(crate::ui::export::hint(tr("Save the view as PNG in", "把视图保存为 PNG，位置："))).clicked() {
                     // Hide the overlays, then capture the canvas with its labels.
                     self.export.start();
                 }

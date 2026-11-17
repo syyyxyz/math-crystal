@@ -57,30 +57,28 @@ pub fn with_icon(icon: &str, text: &str) -> String {
     }
 }
 
-fn read(path: &str) -> Option<FontData> {
-    std::fs::read(path).ok().map(FontData::from_owned)
-}
+/// Fonts compiled into the binary (see scripts/build-fonts.py), so every
+/// platform renders the same: (name, data, proportional, monospace).
+const FONTS: [(&str, &[u8], bool, bool); 6] = [
+    ("Inter", include_bytes!("../../assets/fonts/InterVariable.ttf"), true, false),
+    ("JetBrainsMono", include_bytes!("../../assets/fonts/JetBrainsMonoNL-Regular.ttf"), false, true),
+    ("DejaVuSans", include_bytes!("../../assets/fonts/DejaVuSans.ttf"), true, false),
+    ("DejaVuSansMono", include_bytes!("../../assets/fonts/DejaVuSansMono.ttf"), false, true),
+    ("NerdSymbols", include_bytes!("../../assets/fonts/SymbolsNerdFont-Subset.ttf"), true, true),
+    // Chinese interface text.
+    ("CJK", include_bytes!("../../assets/fonts/CrystalHanSans-Regular.otf"), true, true),
+];
 
-/// Install Inter (UI), JetBrains Mono Nerd Font (numbers, formulas, icons)
-/// and DejaVu Sans (maths symbols) when present; egui's defaults stay as
-/// the last fallback so nothing breaks on other machines.
+/// Install Inter (UI), JetBrains Mono (numbers, formulas), DejaVu Sans
+/// (maths symbols), Nerd Font icons and a Source Han Sans subset (Chinese);
+/// egui's defaults stay as the last fallback.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();
     let mut prop: Vec<String> = Vec::new();
     let mut mono: Vec<String> = Vec::new();
-    // (name, paths, proportional, monospace)
-    let candidates: [(&str, &[&str], bool, bool); 6] = [
-        ("Inter", &["/usr/share/fonts/inter/InterVariable.ttf", "/usr/share/fonts/TTF/Inter-Regular.ttf"], true, false),
-        ("JetBrainsMono", &["/usr/share/fonts/TTF/JetBrainsMonoNLNerdFontMono-Regular.ttf", "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf", "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"], false, true),
-        ("DejaVuSans", &["/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"], true, false),
-        ("DejaVuSansMono", &["/usr/share/fonts/TTF/DejaVuSansMono.ttf"], false, true),
-        ("NerdSymbols", &["/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf"], true, true),
-        // Chinese interface text.
-        ("CJK", &["/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf", "/usr/share/fonts/adobe-source-han-sans/SourceHanSansSC-Regular.otf", "/usr/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf", "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc"], true, true),
-    ];
     let mut icons = false;
-    for (name, paths, for_prop, for_mono) in candidates {
-        let Some(data) = paths.iter().find_map(|p| read(p)) else { continue };
+    for (name, bytes, for_prop, for_mono) in FONTS {
+        let data = FontData::from_static(bytes);
         let data = if name == "NerdSymbols" {
             icons = true;
             // Sit icons on the text baseline.
@@ -260,4 +258,38 @@ pub fn apply(ctx: &egui::Context) {
         ]
         .into();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use skrifa::MetadataProvider;
+
+    /// Every non-ASCII character in the sources (interface text, maths
+    /// symbols, icons) must be in a bundled font; otherwise rerun
+    /// scripts/build-fonts.py.
+    #[test]
+    fn bundled_fonts_cover_source_text() {
+        let fonts: Vec<skrifa::FontRef> = super::FONTS.iter().map(|f| skrifa::FontRef::new(f.1).expect("font parses")).collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stack = vec![root.join("src"), root.join("examples")];
+        let mut missing = std::collections::BTreeMap::<char, String>::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                        for c in line.chars().filter(|&c| c as u32 > 0x7f && !c.is_whitespace()) {
+                            if !fonts.iter().any(|f| f.charmap().map(c).is_some()) {
+                                missing.entry(c).or_insert_with(|| path.display().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "characters without a bundled glyph: {missing:?}");
+    }
 }

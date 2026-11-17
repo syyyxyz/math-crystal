@@ -1,7 +1,8 @@
 //! PNG export of a canvas: hide the overlays for a frame, take a window
-//! screenshot, crop it to the canvas and save it to ~/Pictures/Math-crystal.
+//! screenshot, crop it to the canvas and save it to <Pictures>/Math-crystal.
 
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use egui::{Rect, Ui};
 
@@ -55,6 +56,35 @@ impl Export {
     }
 }
 
+/// Where exports go: <Pictures>/Math-crystal (XDG pictures dir on Linux,
+/// the Pictures known folder on Windows).
+pub fn folder() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        dirs::picture_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Pictures")))
+            .unwrap_or_default()
+            .join("Math-crystal")
+    })
+}
+
+/// Hover text for an export button: `lead` followed by the folder (on Unix
+/// with the home directory shown as `~`).
+pub fn hint(lead: &str) -> String {
+    static LABEL: OnceLock<String> = OnceLock::new();
+    let label = LABEL.get_or_init(|| {
+        let dir = folder();
+        if cfg!(windows) {
+            return dir.display().to_string();
+        }
+        match dirs::home_dir().and_then(|h| dir.strip_prefix(h).ok().map(Path::to_path_buf)) {
+            Some(rel) => Path::new("~").join(rel).display().to_string(),
+            None => dir.display().to_string(),
+        }
+    });
+    format!("{lead} {label}")
+}
+
 /// Whether an export status message reports success.
 pub fn is_ok(msg: &str) -> bool {
     msg.starts_with("Saved") || msg.starts_with("已保存")
@@ -64,8 +94,8 @@ fn save(image: &egui::ColorImage, rect: Rect, ppp: f32, name: &str) -> String {
     let crop = image.region(&rect.shrink(1.0), Some(ppp));
     let [w, h] = crop.size;
     let rgba: Vec<u8> = crop.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
-    let dir = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join("Pictures/Math-crystal");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    let dir = folder();
+    if let Err(e) = std::fs::create_dir_all(dir) {
         return format!("{} {e}", tr("Export failed:", "导出失败:"));
     }
     let path = dir.join(format!("{name}-{}.png", timestamp()));

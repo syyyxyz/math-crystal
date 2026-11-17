@@ -2,8 +2,11 @@
 name = "math-crystal"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Math-crystal: a fast, compact visual math workbench"
 license = "MIT"
+repository = "https://github.com/syyyxyz/math-crystal"
+readme = "README.md"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "persistence"] }
@@ -18,7 +21,7 @@ rustfft = "6.4"
 png = "0.18"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
-pollster = "0.4"
+dirs = "6"
 
 [profile.release]
 opt-level = 3
@@ -31,4 +34,9 @@ strip = true
 opt-level = 2
 
 [dev-dependencies]
+pollster = "0.4"
+skrifa = "0.44"
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot", "eframe"] }
+
+[build-dependencies]
+winresource = "0.1"
