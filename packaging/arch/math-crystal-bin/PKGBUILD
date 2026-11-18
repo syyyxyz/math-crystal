@@ -3,7 +3,7 @@
 # `makepkg --printsrcinfo > .SRCINFO`.
 _owner=syyyxyz
 pkgname=math-crystal-bin
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Visual math workbench: multivariable calculus, complex functions, Fourier spectra, space geometry (prebuilt)"
 arch=('x86_64')
@@ -18,7 +18,7 @@ provides=('math-crystal')
 conflicts=('math-crystal')
 _dir="math-crystal-$pkgver-linux-x86_64"
 source=("$url/releases/download/v$pkgver/$_dir.tar.gz")
-sha256sums=('04f1b0d172e8670c232c35410da144de527d0c523522d629f04ebbada880139e')
+sha256sums=('72785d230ad3da6c4007bfe88ed28053bdeb91a7f6dcd2f65ce793e05bf4b4bb')
 
 package() {
   cd "$_dir"

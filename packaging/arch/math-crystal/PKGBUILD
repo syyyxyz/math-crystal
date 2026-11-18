@@ -3,7 +3,7 @@
 # `makepkg --printsrcinfo > .SRCINFO`.
 _owner=syyyxyz
 pkgname=math-crystal
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Visual math workbench: multivariable calculus, complex functions, Fourier spectra, space geometry"
 arch=('x86_64')
@@ -16,7 +16,7 @@ optdepends=('wayland: Wayland sessions'
             'libxrandr: X11 sessions')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6d9747e7f45bd344ff46898b61154c401fd6d2c60d61569997270855a4af82fd')
+sha256sums=('5d46449c5b3501176177ee34915708bf2a06a2bf7ebc03923a2ac6460b247d62')
 
 prepare() {
   cd "$pkgname-$pkgver"
