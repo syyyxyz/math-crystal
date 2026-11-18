@@ -155,7 +155,7 @@ impl Object {
                 Kind::Surface => match &self.surface {
                     Some(s) => match s.kind {
                         SurfaceKind::Plane { n: nrm, d } => mesh::plane_mesh(nrm, d, lo, hi, (hi - lo).max_element() / n as f64),
-                        _ => mesh::surface_nets(s, lo, hi, n),
+                        _ => mesh::graph_mesh(s, lo, hi, n).unwrap_or_else(|| mesh::surface_nets(s, lo, hi, n)),
                     },
                     None => DMesh::default(),
                 },

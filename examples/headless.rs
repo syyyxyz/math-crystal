@@ -41,7 +41,7 @@ fn main() {
     let mut gpu = Gpu3d::new(&device);
     gpu.set_scene(&device, &scene);
     let pal = s.theme.palette();
-    gpu.render(&device, &queue, size, &View { camera: cam, clip_half: built.frame.half, background: if icon { [0.0; 4] } else { pal.background }, wire: pal.wire });
+    gpu.render(&device, &queue, size, &View { camera: cam, clip_half: built.frame.half, background: if icon { [0.0; 4] } else { pal.background }, wire: pal.wire, meshes: true });
     let (w, h, px) = gpu.read_rgba(&device, &queue).expect("readback");
     write_png(std::path::Path::new(&out), w, h, &px).unwrap();
     eprintln!("wrote {out} ({} meshes, {} lines, {} labels)", scene.meshes.len(), scene.lines.len(), labels.len());

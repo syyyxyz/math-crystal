@@ -5,6 +5,7 @@ pub mod mathview;
 pub mod params;
 pub mod plane;
 pub mod theme;
+pub mod view2d;
 pub mod widgets;
 
 /// The app icon as RGBA8 (width, height, pixels).

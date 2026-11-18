@@ -120,6 +120,11 @@ impl Frame3 {
     }
 }
 
+/// Eye distance of orthographic views (see [`Camera::eye`]).
+const ORTHO_EYE: f32 = 40.0;
+/// Closest orthographic zoom: about 2500× the default view.
+const ORTHO_MIN_DIST: f32 = 0.002;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     /// Radians, around +z; 0 looks from +x.
@@ -151,8 +156,15 @@ impl Camera {
         Vec3::new(cp * self.yaw.cos(), cp * self.yaw.sin(), sp)
     }
 
+    /// Distance from the target to the eye. Orthographic views keep the eye
+    /// far out: their zoom only narrows the view, so zooming in never puts
+    /// the eye inside the scene.
+    fn eye_dist(&self) -> f32 {
+        if self.ortho { ORTHO_EYE } else { self.dist }
+    }
+
     pub fn eye(&self) -> Vec3 {
-        self.target + self.forward_to_eye() * self.dist
+        self.target + self.forward_to_eye() * self.eye_dist()
     }
 
     pub fn view(&self) -> Mat4 {
@@ -164,7 +176,7 @@ impl Camera {
         if self.ortho {
             let h = self.dist * (fov * 0.5).tan();
             let w = h * aspect;
-            glam::camera::rh::proj::directx::orthographic(-w, w, -h, h, 0.01, self.dist * 4.0 + 20.0)
+            glam::camera::rh::proj::directx::orthographic(-w, w, -h, h, 0.01, ORTHO_EYE * 2.0 + 20.0)
         } else {
             glam::camera::rh::proj::directx::perspective(fov, aspect, 0.05, self.dist * 4.0 + 20.0)
         }
@@ -192,8 +204,18 @@ impl Camera {
         self.target += (-right * delta.x + up * delta.y) * per_px;
     }
 
+    /// Zoom by `factor` (< 1 zooms in). Orthographic views can zoom much
+    /// further in.
     pub fn zoom(&mut self, factor: f32) {
-        self.dist = (self.dist * factor).clamp(0.5, 60.0);
+        let min = if self.ortho { ORTHO_MIN_DIST } else { 0.5 };
+        self.dist = (self.dist * factor).clamp(min, 60.0);
+    }
+
+    /// Right and up directions of the screen in world space.
+    pub fn screen_axes(&self) -> (Vec3, Vec3) {
+        let fwd = -self.forward_to_eye();
+        let right = fwd.cross(Vec3::Z).normalize_or_zero();
+        (right, right.cross(fwd).normalize_or_zero())
     }
 }
 
@@ -258,8 +280,10 @@ pub struct GridStyle {
 }
 
 /// Triangulated height field. `z` is row-major `z[j * n + i]` over the data
-/// rectangle; NaN cells are left out.
-pub fn height_mesh(z: &[f64], n: usize, xr: (f64, f64), yr: (f64, f64), frame: &Frame3, style: &GridStyle) -> MeshData {
+/// rectangle; NaN cells are left out. With `edge` (see
+/// [`crate::graph_mesh::edge_polygons`]) only fully defined cells come from
+/// the grid and the cells at the edge of the domain from those polygons.
+pub fn height_mesh(z: &[f64], n: usize, xr: (f64, f64), yr: (f64, f64), frame: &Frame3, style: &GridStyle, edge: Option<&[Vec<crate::graph_mesh::Vertex>]>) -> MeshData {
     let pos: Vec<Option<Vec3>> = z
         .iter()
         .enumerate()
@@ -318,6 +342,9 @@ pub fn height_mesh(z: &[f64], n: usize, xr: (f64, f64), yr: (f64, f64), frame: &
         for i in 0..n - 1 {
             let q = [idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)];
             let ok = |k: u32| pos[k as usize].is_some();
+            if edge.is_some() && !q.iter().all(|&k| ok(k)) {
+                continue;
+            }
             // Split each quad along whichever diagonal has both ends defined.
             for tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
                 if tri.iter().all(|&k| ok(k)) {
@@ -331,6 +358,33 @@ pub fn height_mesh(z: &[f64], n: usize, xr: (f64, f64), yr: (f64, f64), frame: &
                     }
                 }
             }
+        }
+    }
+    // The defined parts of the cells at the edge of the domain.
+    for poly in edge.unwrap_or_default() {
+        let world: Vec<Vec3> = poly
+            .iter()
+            .map(|v| frame.map_xyz(crate::calc::lerp(xr, v[0] / (n - 1) as f64), crate::calc::lerp(yr, v[1] / (n - 1) as f64), v[2]))
+            .collect();
+        if world.len() < 3 {
+            continue;
+        }
+        let nrm = (world[1] - world[0]).cross(world[2] - world[0]).try_normalize().unwrap_or(Vec3::Z);
+        let base = vertices.len() as u32;
+        for (v, p) in poly.iter().zip(&world) {
+            let color = if style.height_colors {
+                let t = (p.z / zh * 0.5 + 0.5).clamp(0.0, 1.0);
+                lin(viridis(0.08 + 0.84 * t), style.color[3])
+            } else {
+                style.color
+            };
+            // Grid corners keep the grid's smooth normal; new edge points
+            // take the polygon's.
+            let normal = if v[0].fract() == 0.0 && v[1].fract() == 0.0 { vertices[v[1] as usize * n + v[0] as usize].normal } else { nrm.to_array() };
+            vertices.push(MeshVertex { pos: p.to_array(), normal, color, grid: [v[0] as f32 / step, v[1] as f32 / step, style.wire_strength] });
+        }
+        for k in 1..world.len() as u32 - 1 {
+            indices.extend_from_slice(&[base, base + k, base + k + 1]);
         }
     }
     MeshData {
@@ -418,7 +472,7 @@ mod tests {
         z[4] = f64::NAN; // centre undefined: every quad touches it
         let f = Frame3::new(DVec3::splat(-1.0), DVec3::splat(1.0), false);
         let style = GridStyle { height_colors: true, color: [1.0; 4], wire_lines: 0.0, wire_strength: 0.0, translucent: false };
-        let m = height_mesh(&z, n, (-1.0, 1.0), (-1.0, 1.0), &f, &style);
+        let m = height_mesh(&z, n, (-1.0, 1.0), (-1.0, 1.0), &f, &style, None);
         assert!(m.indices.chunks(3).all(|t| !t.contains(&4)));
         // Each quad keeps the one triangle that avoids the centre.
         assert_eq!(m.indices.len(), 4 * 3);

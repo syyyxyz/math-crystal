@@ -127,6 +127,8 @@ pub struct SpaceWorkspace {
     draw_ms: f64,
     mesh_ms: f64,
     inter: crate::space_inter::Inter,
+    /// Outlines of the surfaces and solids in the front / side / top drawings.
+    outline: crate::ui::view2d::OutlineCache,
 }
 
 impl Default for SpaceWorkspace {
@@ -179,7 +181,7 @@ impl SpaceWorkspace {
             show_grid: false,
             show_legend: true,
             layers_open: false,
-            view: View3d::default(),
+            view: View3d::planar(),
             scene: Scene::default(),
             scene_key: String::new(),
             scene_version: 0,
@@ -189,6 +191,7 @@ impl SpaceWorkspace {
             draw_ms: 0.0,
             mesh_ms: 0.0,
             inter: Default::default(),
+            outline: Default::default(),
         };
         let first = scenes().swap_remove(0);
         s.set_objects(first.2);
@@ -376,7 +379,12 @@ impl SpaceWorkspace {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let small = |s: &str, c: Color32| RichText::new(s).size(12.0).color(c);
-                    ui.label(small(tr("Drag to rotate · Right-drag to pan · Scroll to zoom · Double-click to reset", "拖动旋转 · 右键拖动平移 · 滚轮缩放 · 双击重置"), t.faint));
+                    let hint = if self.view.plane_axes().is_some() {
+                        tr("Drag to pan · Scroll to zoom at the cursor · Double-click to fit", "拖动平移 · 滚轮以光标为中心缩放 · 双击复位")
+                    } else {
+                        tr("Drag to rotate · Right-drag to pan · Scroll to zoom · Double-click to reset", "拖动旋转 · 右键拖动平移 · 滚轮缩放 · 双击重置")
+                    };
+                    ui.label(small(hint, t.faint));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &self.toast {
                         Some((msg, at)) if at.elapsed().as_secs_f32() < 5.0 => {
                             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
@@ -614,7 +622,7 @@ impl SpaceWorkspace {
             self.scene_version += 1;
             self.mesh_ms = t0.elapsed().as_secs_f64() * 1e3;
         }
-        self.view.allocate(ui, rect);
+        let resp = self.view.allocate(ui, rect);
         let proj = self.view.projector(rect);
         let settings = calc_view::Settings { xr: self.xr, yr: self.yr, zr: self.zr, show_grid: self.show_grid, show_ticks: true, theme, ..Default::default() };
         let (deco, labels) = calc_view::decorations(&settings, &self.frame3, &self.view.camera, &proj, ["x", "y", "z"]);
@@ -622,7 +630,30 @@ impl SpaceWorkspace {
         if !self.view.render(ui, frame, rect, &self.scene, self.scene_version, deco, self.frame3.half, pal.background, pal.wire) {
             return;
         }
-        canvas3d::paint_labels(&ui.painter_at(rect), rect, &proj, labels);
+        let Some(a) = crate::ui::view2d::Axes2::new(&self.view, &self.frame3, rect) else {
+            canvas3d::paint_labels(&ui.painter_at(rect), rect, &proj, labels);
+            return;
+        };
+        // Front / side / top: a 2D drawing.
+        if self.view.outline_only {
+            let (objects, inter) = (&self.objects, &self.inter);
+            let originals = inter.originals;
+            self.outline.update(self.scene_version * 2 + t.dark as u64, &a, |plane| {
+                objects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| o.visible && o.kind != Kind::Curve && originals != Originals::Hide)
+                    .map(|(k, o)| {
+                        let m = inter.mesh_for(k, o);
+                        let tris = m.tris.iter().map(|t| t.map(|i| m.pos[i as usize]));
+                        let color = c32(COLORS[o.color]);
+                        (crate::outline::outline(tris, plane), if originals == Originals::Faint { color.gamma_multiply(0.35) } else { color })
+                    })
+                    .collect()
+            });
+            self.outline.paint(ui, &a, 2.0);
+        }
+        a.draw(ui, t, ["x", "y", "z"], resp.hover_pos(), None);
     }
 
     fn overlays(&mut self, ui: &mut Ui, rect: Rect, t: &Tokens) {

@@ -28,6 +28,38 @@ pub struct Implicit {
     second: Program,
     pub params: Vec<String>,
     pub kind: SurfaceKind,
+    /// Written as a graph `x = g(y, z)` (any axis on either side).
+    graph: Option<Graph>,
+}
+
+/// The explicit side of a graph surface.
+#[derive(Clone)]
+struct Graph {
+    axis: usize,
+    g: Program,
+    params: Vec<String>,
+}
+
+/// `x = g(y, z)`, `g(x, y) = z` …: the lone variable's axis and g, which
+/// must not involve that variable.
+fn graph_form(src: &str) -> Option<Graph> {
+    let s = plain(src).ok()?;
+    let eq = equals_signs(&s);
+    if eq.len() != 1 {
+        return None;
+    }
+    let (l, r) = (s[..eq[0]].trim(), s[eq[0] + 1..].trim());
+    for (lone, other) in [(l, r), (r, l)] {
+        let Some(axis) = ["x", "y", "z"].iter().position(|v| *v == lone) else { continue };
+        let mut pool = Pool::new();
+        let mut params = Vec::new();
+        let id = crate::expr::parse_with_params(other, &mut pool, &xyz(), false, &mut params).ok()?;
+        if pool.depends_on(id, axis as u8) {
+            return None;
+        }
+        return Some(Graph { axis, g: Program::compile(&pool, &[id]), params });
+    }
+    None
 }
 
 pub fn xyz() -> Vars {
@@ -140,7 +172,23 @@ impl Implicit {
         let value = Program::compile(&pool, &[f]);
         let with_grad = Program::compile(&pool, &[f, grad[0], grad[1], grad[2]]);
         let second = Program::compile(&pool, &second);
-        Ok(Self { source: src.trim().to_string(), pool, f, value, with_grad, second, params, kind: SurfaceKind::General })
+        let graph = graph_form(src);
+        Ok(Self { source: src.trim().to_string(), pool, f, value, with_grad, second, params, kind: SurfaceKind::General, graph })
+    }
+
+    /// For a graph `a = g(b, c)`: the axis a.
+    pub fn graph_axis(&self) -> Option<usize> {
+        self.graph.as_ref().map(|g| g.axis)
+    }
+
+    /// g at many points `(b, c)`, b and c the axes after a in cyclic order.
+    pub fn graph_values(&self, bs: &[f64], cs: &[f64]) -> Vec<f64> {
+        let Some(gr) = &self.graph else { return vec![f64::NAN; bs.len()] };
+        let zero = vec![0.0; bs.len()];
+        let mut cols: [&[f64]; 3] = [&zero, &zero, &zero];
+        cols[(gr.axis + 1) % 3] = bs;
+        cols[(gr.axis + 2) % 3] = cs;
+        gr.g.eval_batch(&cols, bs.len()).swap_remove(0)
     }
 
     pub fn expr(&self) -> (&Pool, Id) {
@@ -152,6 +200,10 @@ impl Implicit {
         let v: Vec<f64> = self.params.iter().map(|p| named.iter().find(|(n, _)| n == p).map_or(f64::NAN, |(_, v)| *v)).collect();
         for p in [&mut self.value, &mut self.with_grad, &mut self.second] {
             p.set_params(&v);
+        }
+        if let Some(gr) = &mut self.graph {
+            let v: Vec<f64> = gr.params.iter().map(|p| named.iter().find(|(n, _)| n == p).map_or(f64::NAN, |(_, v)| *v)).collect();
+            gr.g.set_params(&v);
         }
     }
 

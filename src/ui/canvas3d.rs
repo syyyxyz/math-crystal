@@ -39,23 +39,53 @@ pub struct View3d {
     pub camera: Camera,
     pub preset: ViewPreset,
     gpu: Option<Gpu>,
+    /// Front / side / top are 2D drawings (pan instead of orbit, zoom about
+    /// the cursor, always orthographic). Set by workspaces that draw the 2D
+    /// axes and outlines (see `ui::view2d`).
+    pub planar: bool,
+    /// In a 2D drawing: hide the shaded surfaces, show outlines only.
+    pub outline_only: bool,
+    /// Projection chosen before a 2D drawing forced orthographic.
+    ortho_before: Option<bool>,
 }
 
 impl Default for View3d {
     fn default() -> Self {
-        Self { camera: Camera::default(), preset: ViewPreset::Iso, gpu: None }
+        Self { camera: Camera::default(), preset: ViewPreset::Iso, gpu: None, planar: false, outline_only: false, ortho_before: None }
     }
 }
 
 impl View3d {
+    /// A view whose front / side / top presets are 2D drawings.
+    pub fn planar() -> Self {
+        Self { planar: true, ..Default::default() }
+    }
+
     pub fn adapter(&self) -> String {
         self.gpu.as_ref().map(|g| g.adapter.clone()).unwrap_or_default()
+    }
+
+    /// Axes of the current 2D drawing as `[horizontal, vertical, depth]`
+    /// (indices of x, y, z), or None in 3D.
+    pub fn plane_axes(&self) -> Option<[usize; 3]> {
+        if !self.planar {
+            return None;
+        }
+        match self.preset {
+            ViewPreset::Front => Some([0, 2, 1]),
+            ViewPreset::Side => Some([1, 2, 0]),
+            ViewPreset::Top => Some([0, 1, 2]),
+            _ => None,
+        }
     }
 
     /// Allocate the canvas rect and apply orbit / pan / zoom / reset.
     /// Primary drag with Shift held is left to the caller.
     pub fn allocate(&mut self, ui: &mut Ui, rect: Rect) -> Response {
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+        if self.plane_axes().is_some() {
+            return self.allocate_planar(ui, rect, resp);
+        }
         let shift = ui.input(|i| i.modifiers.shift);
         if resp.dragged_by(egui::PointerButton::Primary) && !shift {
             let d = resp.drag_delta();
@@ -80,6 +110,44 @@ impl View3d {
         resp
     }
 
+    /// 2D drawing: any drag pans, scroll zooms about the cursor, double-click
+    /// fits the box again.
+    fn allocate_planar(&mut self, ui: &mut Ui, rect: Rect, resp: Response) -> Response {
+        let shift = ui.input(|i| i.modifiers.shift);
+        let drag = (resp.dragged_by(egui::PointerButton::Primary) && !shift) || resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle);
+        if drag {
+            let d = resp.drag_delta();
+            self.camera.pan(Vec2::new(d.x, d.y), rect.height());
+        }
+        if resp.hovered()
+            && let Some(pos) = resp.hover_pos()
+        {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                self.zoom_at(rect, pos, (-scroll * 0.0015).exp().clamp(0.8, 1.25));
+            }
+        }
+        if resp.double_clicked() {
+            self.apply_preset(self.preset);
+        }
+        resp
+    }
+
+    /// Orthographic zoom keeping the point under `pos` in place.
+    fn zoom_at(&mut self, rect: Rect, pos: Pos2, factor: f32) {
+        let cam = &mut self.camera;
+        let aspect = rect.width().max(1.0) / rect.height().max(1.0);
+        let h = cam.dist * (cam.fov_deg.to_radians() * 0.5).tan();
+        // Normalised device coordinates; view_proj nudges the picture up by 0.05.
+        let nx = (pos.x - rect.min.x) / rect.width().max(1.0) * 2.0 - 1.0;
+        let ny = 1.0 - (pos.y - rect.min.y) / rect.height().max(1.0) * 2.0 - 0.05;
+        let (right, up) = cam.screen_axes();
+        let offset = right * nx * h * aspect + up * ny * h;
+        let before = cam.dist;
+        cam.zoom(factor);
+        cam.target += offset * (1.0 - cam.dist / before);
+    }
+
     pub fn projector(&self, rect: Rect) -> Projector {
         let aspect = rect.width().max(1.0) / rect.height().max(1.0);
         Projector { vp: self.camera.view_proj(aspect), size: Vec2::new(rect.width(), rect.height()) }
@@ -92,7 +160,8 @@ impl View3d {
         let t = tokens(ui.ctx());
         let ppp = ui.ctx().pixels_per_point();
         let size_px = [((rect.width() * ppp).round() as u32).max(1), ((rect.height() * ppp).round() as u32).max(1)];
-        let view = View { camera: self.camera, clip_half, background, wire };
+        let meshes = !(self.outline_only && self.plane_axes().is_some());
+        let view = View { camera: self.camera, clip_half, background, wire, meshes };
         let Some(rs) = frame.wgpu_render_state() else {
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("wgpu is not available", "wgpu 不可用"), FontId::proportional(18.0), t.error);
             return false;
@@ -124,8 +193,25 @@ impl View3d {
     }
 
     pub fn apply_preset(&mut self, p: ViewPreset) {
-        let keep = (self.camera.ortho, self.camera.fov_deg);
+        let planar = self.planar && matches!(p, ViewPreset::Front | ViewPreset::Side | ViewPreset::Top);
+        // 2D drawings are orthographic; going back to 3D restores the choice.
+        let ortho = if planar {
+            self.ortho_before.get_or_insert(self.camera.ortho);
+            true
+        } else {
+            self.ortho_before.take().unwrap_or(self.camera.ortho)
+        };
+        let keep = (ortho, self.camera.fov_deg);
         let cam = &mut self.camera;
+        if planar {
+            // Fit the box: centred, default zoom.
+            let fresh = Camera::default();
+            (cam.target, cam.dist) = (fresh.target, fresh.dist);
+        }
+        cam.ortho = ortho;
+        if !ortho {
+            cam.dist = cam.dist.max(0.5);
+        }
         match p {
             ViewPreset::Iso | ViewPreset::Custom => {
                 *cam = Camera::default();
@@ -147,8 +233,14 @@ impl View3d {
         self.preset = if p == ViewPreset::Custom { ViewPreset::Iso } else { p };
     }
 
-    /// Field of view (perspective only) and projection; for a right-to-left row.
+    /// Field of view (perspective only) and projection; for a right-to-left
+    /// row. In a 2D drawing (always orthographic): the outline switch.
     pub fn projection_controls(&mut self, ui: &mut Ui) {
+        if self.plane_axes().is_some() {
+            ui.toggle_value(&mut self.outline_only, with_icon(icon::CURVE, tr("Outline only", "只看轮廓")))
+                .on_hover_text(tr("Hide the shaded surfaces and draw their outer outlines", "隐藏着色曲面，只画外轮廓线"));
+            return;
+        }
         if !self.camera.ortho {
             ui.add(egui::Slider::new(&mut self.camera.fov_deg, 10.0..=80.0).suffix("°").max_decimals(0)).on_hover_text(tr("Field of view", "视场角"));
         }
@@ -159,6 +251,8 @@ impl View3d {
             &[(Projection::Ortho, tr("Ortho", "正交"), tr("Orthographic projection", "正交投影")), (Projection::Persp, tr("Persp", "透视"), tr("Perspective projection", "透视投影"))],
         ) {
             self.camera.ortho = proj == Projection::Ortho;
+            // Orthographic zoom can go much closer than perspective allows.
+            self.camera.zoom(1.0);
         }
     }
 

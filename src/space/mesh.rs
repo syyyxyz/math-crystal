@@ -207,6 +207,87 @@ pub fn surface_nets(s: &Implicit, lo: DVec3, hi: DVec3, n: usize) -> DMesh {
     mesh
 }
 
+/// Mesh of a graph surface `a = g(b, c)` whose domain ends inside the box:
+/// sampled over the (b, c) plane, with the cells at the edge of the domain
+/// refined (see [`crate::graph_mesh`]) so the surface reaches that edge.
+/// Surface nets drops those cells and loses a band wherever the surface is
+/// steep there (x = √(1 − 3y² − 3z²) at its rim). None for other surfaces
+/// and for graphs defined on the whole box (surface nets does well there).
+pub fn graph_mesh(s: &Implicit, lo: DVec3, hi: DVec3, n: usize) -> Option<DMesh> {
+    use crate::graph_mesh::{Vertex, defined, edge_polygons, fan};
+    let a = s.graph_axis()?;
+    let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+    // Twice the density of the 3D grid: the samples are only 2D.
+    let dims = grid_dims(lo, hi, 2 * n);
+    const PAD: usize = 2;
+    let range = |k: usize| {
+        let h = (hi[k] - lo[k]) / dims[k] as f64;
+        ((lo[k] - h * PAD as f64, hi[k] + h * PAD as f64), dims[k] + 2 * PAD + 1)
+    };
+    let ((br, nb), (cr, nc)) = (range(b), range(c));
+    let to_b = |f: f64| crate::calc::lerp(br, f / (nb - 1) as f64);
+    let to_c = |f: f64| crate::calc::lerp(cr, f / (nc - 1) as f64);
+    let mut bs = Vec::with_capacity(nb * nc);
+    let mut cs = Vec::with_capacity(nb * nc);
+    for j in 0..nc {
+        for i in 0..nb {
+            bs.push(to_b(i as f64));
+            cs.push(to_c(j as f64));
+        }
+    }
+    let v: Vec<f64> = s.graph_values(&bs, &cs).into_iter().map(|x| if defined(x) { x } else { f64::NAN }).collect();
+    if v.iter().all(|x| x.is_finite()) || v.iter().all(|x| !x.is_finite()) {
+        return None;
+    }
+    let edge = edge_polygons(&v, [nb, nc], br, cr, &|bs, cs| s.graph_values(bs, cs));
+
+    let mut mesh = DMesh::default();
+    let mut index = std::collections::HashMap::<(u64, u64), u32>::new();
+    let mut vertex = |mesh: &mut DMesh, q: Vertex| -> u32 {
+        *index.entry((q[0].to_bits(), q[1].to_bits())).or_insert_with(|| {
+            let mut p = DVec3::ZERO;
+            p[a] = q[2];
+            p[b] = to_b(q[0]);
+            p[c] = to_c(q[1]);
+            mesh.push(p, DVec3::ZERO)
+        })
+    };
+    // A triangle spanning more than the whole box along a crosses a pole.
+    let span = hi[a] - lo[a];
+    let mut tri = |mesh: &mut DMesh, t: [Vertex; 3]| {
+        let (mn, mx) = t.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), q| (mn.min(q[2]), mx.max(q[2])));
+        if mx - mn > span {
+            return;
+        }
+        let ids = t.map(|q| vertex(mesh, q));
+        mesh.tris.push(ids);
+    };
+    let corner = |i: usize, j: usize| -> Vertex { [i as f64, j as f64, v[j * nb + i]] };
+    for j in 0..nc - 1 {
+        for i in 0..nb - 1 {
+            let q = [corner(i, j), corner(i + 1, j), corner(i + 1, j + 1), corner(i, j + 1)];
+            if q.iter().all(|p| p[2].is_finite()) {
+                tri(&mut mesh, [q[0], q[1], q[2]]);
+                tri(&mut mesh, [q[0], q[2], q[3]]);
+            }
+        }
+    }
+    for t in fan(&edge) {
+        tri(&mut mesh, t);
+    }
+    // Smooth normals from the faces around each vertex.
+    let mut acc = vec![DVec3::ZERO; mesh.pos.len()];
+    for t in &mesh.tris {
+        let [p0, p1, p2] = t.map(|k| mesh.pos[k as usize]);
+        let fnrm = (p1 - p0).cross(p2 - p0);
+        for k in t {
+            acc[*k as usize] += fnrm;
+        }
+    }
+    mesh.nrm = acc.into_iter().map(|n| n.try_normalize().unwrap_or(DVec3::Z)).collect();
+    Some(mesh)
+}
+
 /// The polygon where the plane `n · p = d` meets the box.
 pub fn plane_polygon(n: DVec3, d: f64, lo: DVec3, hi: DVec3) -> Vec<DVec3> {
     let len = n.length();
@@ -425,6 +506,29 @@ mod tests {
             }
         }
         assert!(count.values().all(|&c| c == 2));
+    }
+
+    #[test]
+    fn graph_reaches_the_rim_of_its_domain() {
+        // The half ellipsoid x = √(1 − 3y² − 3z²): its rim is the ellipse
+        // 3y² + 3z² = 1 in the plane x = 0.
+        let s = Implicit::new(r"x=\sqrt{1-3y^{2}-3z^{2}}").unwrap();
+        let (lo, hi) = (DVec3::splat(-3.0), DVec3::splat(3.0));
+        let m = graph_mesh(&s, lo, hi, 80).expect("a graph with a domain edge");
+        let min_x = m.pos.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        assert!(min_x < 0.01, "reaches x = 0 (got {min_x})");
+        for p in &m.pos {
+            let r = 3.0 * (p.y * p.y + p.z * p.z);
+            assert!(r <= 1.0 + 1e-6, "outside the domain at {p}");
+            assert!((p.x - (1.0 - r).max(0.0).sqrt()).abs() < 1e-6, "off the surface at {p}");
+        }
+        // Surface nets loses the steep band near the rim.
+        let nets = surface_nets(&s, lo, hi, 80);
+        let nets_min = nets.pos.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        assert!(nets_min > 0.1, "surface nets reached {nets_min}");
+        // Graphs defined everywhere keep surface nets.
+        assert!(graph_mesh(&Implicit::new("z = x^2 + y^2").unwrap(), lo, hi, 80).is_none());
+        assert!(graph_mesh(&Implicit::new("x^2 + y^2 + z^2 = 4").unwrap(), lo, hi, 80).is_none());
     }
 
     #[test]

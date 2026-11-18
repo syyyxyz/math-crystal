@@ -375,6 +375,8 @@ pub struct CalcWorkspace {
     pick_mode: bool,
     /// The layer chips below the canvas are unfolded.
     layers_open: bool,
+    /// Outline of the surface in the front / side / top drawings.
+    outline: crate::ui::view2d::OutlineCache,
 }
 
 impl CalcWorkspace {
@@ -386,7 +388,7 @@ impl CalcWorkspace {
             error: None,
             settings: Settings::default(),
             z_auto: true,
-            view: View3d::default(),
+            view: View3d::planar(),
             built_for: None,
             scene: Scene::default(),
             frame: Frame3::new(glam::DVec3::splat(-1.0), glam::DVec3::splat(1.0), false),
@@ -416,6 +418,7 @@ impl CalcWorkspace {
             analysis_version: 0,
             pick_mode: false,
             layers_open: false,
+            outline: Default::default(),
         };
         s.recompile();
         s.update_auto_z();
@@ -499,6 +502,9 @@ impl CalcWorkspace {
         if let Some(surf) = &mut self.surface {
             let (xr, yr) = (self.settings.xr, self.settings.yr);
             let mut z = surf.sample(xr, yr, 65);
+            // Values out to the edge of the domain (the grid stops short of it).
+            let edge = crate::graph_mesh::edge_polygons(&z, [65, 65], xr, yr, &|xs, ys| surf.eval_f_batch(xs, ys));
+            z.extend(edge.iter().flatten().map(|v| v[2]));
             // A playing parameter: fit the whole sweep so the box holds still.
             let base = self.params.values();
             for (k, p) in self.params.items.iter().enumerate().filter(|(_, p)| p.playing) {
@@ -1174,7 +1180,30 @@ impl CalcWorkspace {
             return;
         }
         let painter = ui.painter_at(rect);
-        canvas3d::paint_labels(&painter, rect, &proj, labels);
+        if let Some(a) = crate::ui::view2d::Axes2::new(&self.view, &self.frame, rect) {
+            // Front / side / top: a 2D drawing.
+            if self.view.outline_only
+                && let Some(surf) = &self.surface
+            {
+                // Sampled afresh for the view, so the outline (and in the top
+                // view the edge of the domain) sharpens as one zooms in.
+                let color = t.text;
+                self.outline.update(self.scene_version * 2 + t.dark as u64, &a, |plane| {
+                    let tris = crate::outline::graph_tris(|xs, ys| surf.eval_f_batch(xs, ys), plane);
+                    vec![(crate::outline::outline(tris, plane), color)]
+                });
+                self.outline.paint(ui, &a, 1.8);
+            }
+            // Looking down: the value of f under the cursor too.
+            let surf = self.surface.as_ref().filter(|_| a.axes[2] == 2);
+            let value = |x: f64, y: f64| -> Option<String> {
+                let v = surf?.f(x, y);
+                Some(if v.is_finite() { format!("f = {}", fmt_val(v)) } else { tr("f is undefined here", "f 在此处无定义").to_string() })
+            };
+            a.draw(ui, &t, ["x", "y", "z"], resp.hover_pos(), Some(&value));
+        } else {
+            canvas3d::paint_labels(&painter, rect, &proj, labels);
+        }
         self.point_label(&painter, rect, &proj);
         self.finish_canvas(ui, rect, &t);
     }
@@ -1199,6 +1228,8 @@ impl CalcWorkspace {
                     let small = |s: &str, c: Color32| RichText::new(s).size(12.0).color(c);
                     let hint = if self.mode == CanvasMode::Map {
                         tr("Click or drag on the map to move P · Hover for values · F1 help", "在地图上单击或拖动移动 P · 悬停查看数值 · F1 帮助")
+                    } else if self.view.plane_axes().is_some() {
+                        tr("Drag to pan · Scroll to zoom at the cursor · Double-click to fit · Shift+click to move P · F1 help", "拖动平移 · 滚轮以光标为中心缩放 · 双击复位 · Shift+单击移动 P · F1 帮助")
                     } else {
                         tr("Drag to rotate · Right-drag to pan · Scroll to zoom · Shift+click to move P · F1 help", "拖动旋转 · 右键拖动平移 · 滚轮缩放 · Shift+单击移动 P · F1 帮助")
                     };

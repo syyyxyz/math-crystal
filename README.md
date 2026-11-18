@@ -12,6 +12,7 @@
 - **空间几何**：隐式曲面 F(x, y, z) = 0（二次曲面自动识别并给出标准方程）、直线 / 曲线、球、柱、锥、长方体；求交线、交点、切点，投影到坐标平面，用 x / y / z = c 截面查看截面实形。
 - **复变函数**：定义域着色、|f| 起伏曲面、映射网格；解析性检验、零点与极点、留数、围道积分。
 - **频谱**：给出绝对可积的 f(t)，画出傅里叶频谱、带限重构，演示采样与 DFT。
+- 多元微积分和空间几何的正视、侧视、俯视是二维图：刻度随缩放加密，鼠标处显示坐标（俯视图还显示函数值），标出视线方向的范围；可切换「只看轮廓」，只画曲面的外轮廓线，俯视图里即定义域的边界。
 - 未知的单个字母自动变成参数滑块，可播放动画；视图可导出 PNG（保存在「图片/Math-crystal」）。
 - 关闭后再打开，各工作区的公式、参数值、范围和空间几何里的对象都会恢复，并回到上次所在的工作区。
 
@@ -72,7 +73,7 @@ Linux 上编译需要 `libxkbcommon` 和 `wayland` 的开发文件（Arch 已自
 - **Complex functions** — domain colouring, |f| relief, mapping grids; holomorphy check, zeros and poles, residues, contour integrals.
 - **Spectrum** — Fourier spectrum of an absolutely integrable f(t), band-limited reconstruction, sampling and the DFT.
 
-Unknown single letters become parameter sliders (with play). Views export as PNG to `Pictures/Math-crystal`. Formulas, parameter values, ranges and space objects are restored at the next start.
+Front, side and top views are 2D drawings with ticks that follow the zoom, a coordinate readout under the cursor and an "Outline only" switch that draws just the outer outlines (in the top view: the edge of the domain). Unknown single letters become parameter sliders (with play). Views export as PNG to `Pictures/Math-crystal`. Formulas, parameter values, ranges and space objects are restored at the next start.
 
 **Install** — from [Releases](../../releases): unzip `math-crystal-<version>-windows-x86_64.zip` and run `math-crystal.exe` (the binary is unsigned, so SmartScreen may ask: *More info → Run anyway*). If it cannot start, it shows the error (also saved to `%LOCALAPPDATA%\Math-crystal\crash.log`) and, when the graphics back end is at fault, offers to restart on OpenGL; that choice is kept in `backend.txt` next to the log — delete it to go back to the default; on Arch install `math-crystal` or `math-crystal-bin` from the AUR; on other Linux distributions unpack the `.tar.gz` and run `math-crystal`. A GPU driver with Vulkan, DirectX 12 or OpenGL ES 3 is required. The integrated GPU is used by default; set `WGPU_POWER_PREF=high` to use the discrete one.
 

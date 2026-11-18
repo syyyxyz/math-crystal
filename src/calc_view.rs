@@ -388,7 +388,9 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
             wire_strength: if s.surface_coloring == Coloring::Height { 0.55 } else { 0.35 },
             translucent: s.surface_coloring == Coloring::Solid,
         };
-        scene.meshes.push(height_mesh(&z, n, s.xr, s.yr, &frame, &style));
+        // Cells at the edge of the domain keep their defined part.
+        let edge = crate::graph_mesh::edge_polygons(&z, [n, n], s.xr, s.yr, &|xs, ys| surf.eval_f_batch(xs, ys));
+        scene.meshes.push(height_mesh(&z, n, s.xr, s.yr, &frame, &style, Some(&edge)));
     }
     let d = surf.derivs(s.a, s.b);
     let width = 3.0;
@@ -424,7 +426,7 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
                 wire_strength: 0.25,
                 translucent: true,
             };
-            let mut mesh = height_mesh(&zm, m, s.xr, s.yr, &frame, &style);
+            let mut mesh = height_mesh(&zm, m, s.xr, s.yr, &frame, &style, None);
             if s.model_coloring == Coloring::Height {
                 for v in &mut mesh.vertices {
                     v.color[3] = 0.62;
@@ -442,7 +444,7 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
                 wire_strength: 0.2,
                 translucent: true,
             };
-            scene.meshes.push(height_mesh(&zp, m, s.xr, s.yr, &frame, &style));
+            scene.meshes.push(height_mesh(&zp, m, s.xr, s.yr, &frame, &style, None));
         }
         let p = frame.map_xyz(s.a, s.b, d.f);
         let span_x = (s.xr.1 - s.xr.0) * 0.28;

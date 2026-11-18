@@ -197,7 +197,7 @@ pub fn relief(f: &CFunc, center: C64, half: f64, n: usize, height: Height, st: &
     let bottom = zr.0 - (zr.1 - zr.0) * 0.02;
     let hs: Vec<f64> = hs.iter().map(|&v| if v.is_finite() { v.clamp(bottom, top) } else if height == Height::Modulus { top } else { f64::NAN }).collect();
     let style = GridStyle { height_colors: false, color: [1.0, 1.0, 1.0, 1.0], wire_lines: if wire { 16.0 } else { 0.0 }, wire_strength: if wire { 0.22 } else { 0.0 }, translucent: false };
-    let mut mesh = height_mesh(&hs, n, xr, yr, &frame, &style);
+    let mut mesh = height_mesh(&hs, n, xr, yr, &frame, &style, None);
     for (v, w) in mesh.vertices.iter_mut().zip(&ws) {
         let c = color(*w, st);
         v.color = lin(c, 1.0);

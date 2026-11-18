@@ -41,6 +41,8 @@ pub struct View {
     pub background: [f32; 4],
     /// Linear RGB wireframe colour.
     pub wire: [f32; 3],
+    /// Draw the triangle meshes (off: lines only, for outline drawings).
+    pub meshes: bool,
 }
 
 struct Target {
@@ -360,7 +362,7 @@ impl Gpu3d {
             };
             // Opaque meshes, then lines, then translucent triangles far to near.
             pass.set_pipeline(&self.opaque);
-            for m in &self.meshes {
+            for m in self.meshes.iter().filter(|_| view.meshes) {
                 draw(&mut pass, m);
             }
             if let Some(buf) = &self.line_buf {
@@ -368,7 +370,7 @@ impl Gpu3d {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..6, 0..self.line_count);
             }
-            if let Some(tb) = &mut self.translucent_batch {
+            if let Some(tb) = self.translucent_batch.as_mut().filter(|_| view.meshes) {
                 let key = (cam.eye(), to_eye, cam.ortho);
                 if tb.sorted_for != Some(key) {
                     let eye = cam.eye();
