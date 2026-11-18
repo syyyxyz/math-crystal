@@ -34,14 +34,14 @@ pub fn xyz() -> Vars {
     Vars(vec!["x", "y", "z"])
 }
 
-/// LaTeX to plain syntax (if it looks like LaTeX), without `$`.
+/// Pasted or LaTeX text to plain syntax, keeping both sides of `=`.
 pub fn plain(src: &str) -> Result<String, ParseError> {
-    let s = src.trim();
-    if crate::expr::latex::looks_like_latex(s) {
+    let s = crate::expr::latex::clean(src);
+    if crate::expr::latex::looks_like_latex(&s) || crate::expr::latex::is_typeset(src) {
         // The translation writes `=` as the comparison `==`.
-        crate::expr::latex::to_plain(s).map(|t| t.replace("==", "="))
+        crate::expr::latex::to_plain_equation(&s).map(|t| t.replace("==", "="))
     } else {
-        Ok(s.to_string())
+        Ok(s)
     }
 }
 
@@ -271,6 +271,19 @@ mod tests {
         assert_eq!(class("x^2/4 + y^2/9 + z^2 = 1"), Class::Ellipsoid);
         assert!(matches!(kind("z = sin(x) + y"), SurfaceKind::General));
         assert!(matches!(kind("x^2 + y^2 + z^2 = 1/(x^2+1)"), SurfaceKind::General));
+    }
+
+    #[test]
+    fn pasted_equations() {
+        assert_eq!(class("$$x^2+y^2+z^2=4.$$"), Class::Ellipsoid);
+        assert_eq!(class(r"\frac{x^2}{4}+\frac{y^2}{9}-z^2=1"), Class::Hyperboloid1);
+        assert_eq!(class("x² + y² = z²"), Class::Cone);
+        // The upper half-cone keeps its `z =`: zero on the cone, not at the axis.
+        let mut pool = Pool::new();
+        let f = parse_equation(r"z=\sqrt{x^2+y^2}", &mut pool, &xyz(), &mut Vec::new()).unwrap();
+        let p = Program::compile(&pool, &[f]);
+        assert!(p.eval(&[3.0, 4.0, 5.0])[0].abs() < 1e-12);
+        assert!((p.eval(&[3.0, 4.0, 0.0])[0] + 5.0).abs() < 1e-12);
     }
 
     #[test]

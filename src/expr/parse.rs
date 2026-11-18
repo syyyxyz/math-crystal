@@ -145,12 +145,19 @@ pub fn parse_with_params(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool,
 fn parse_inner(src: &str, pool: &mut Pool, vars: &Vars, allow_i: bool, params: Option<&mut Vec<String>>) -> Result<Id, ParseError> {
     // LaTeX is translated first; error columns then refer to the translation,
     // which the UI shows next to the input.
+    // Pasted text is tidied first (delimiters, typographic Unicode,
+    // trailing punctuation); plain input that needs no tidying keeps its
+    // original columns.
+    let cleaned = super::latex::clean(src);
     let translated;
-    let src = if super::latex::looks_like_latex(src) {
-        translated = super::latex::to_plain(src)?;
+    let src = if super::latex::looks_like_latex(&cleaned) || super::latex::is_typeset(src) {
+        translated = super::latex::to_plain(&cleaned)?;
         translated.as_str()
-    } else {
+    } else if cleaned == src.trim() {
         super::latex::strip_lhs(src)
+    } else {
+        translated = cleaned;
+        super::latex::strip_lhs(&translated)
     };
     if params.is_some() {
         pool.first_param = Some(vars.0.len() as u8);

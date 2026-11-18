@@ -31,8 +31,10 @@ pub fn strip_lhs(src: &str) -> &str {
         if matches!(prev, b'<' | b'>' | b'!' | b'=') || next == b'=' {
             return src;
         }
-        let lhs: String = src[..i].chars().filter(|c| !c.is_whitespace()).collect();
-        let lhs = lhs.trim_start_matches('$');
+        let mut lhs: String = src[..i].chars().filter(|c| !c.is_whitespace()).collect();
+        for noise in ["\\left", "\\right", "\\displaystyle", "\\textstyle", "\\,", "\\!", "{", "}", "$"] {
+            lhs = lhs.replace(noise, "");
+        }
         let mut ch = lhs.chars();
         let ok = match ch.next() {
             Some(n) if n.is_ascii_alphabetic() => {
@@ -92,20 +94,238 @@ fn lex(src: &str) -> Vec<T> {
 
 /// Translate LaTeX into the plain syntax.
 pub fn to_plain(src: &str) -> Result<String, ParseError> {
-    let mut s = src.trim();
-    for (a, b) in [("$$", "$$"), ("$", "$"), ("\\[", "\\]"), ("\\(", "\\)")] {
-        if s.len() >= a.len() + b.len() && s.starts_with(a) && s.ends_with(b) {
-            s = s[a.len()..s.len() - b.len()].trim();
-            break;
-        }
-    }
-    let s = strip_lhs(s);
+    convert(strip_lhs(&clean(src)))
+}
+
+/// Like [`to_plain`] but keeps a left-hand side such as `z =` (written as
+/// `==`), for equations of surfaces and curves.
+pub fn to_plain_equation(src: &str) -> Result<String, ParseError> {
+    convert(&clean(src))
+}
+
+fn convert(s: &str) -> Result<String, ParseError> {
     let mut c = Conv { t: lex(s), i: 0, cond: false, otherwise: false };
     let out = c.seq(&|_| false)?;
     if c.i < c.t.len() {
         return Err(c.err(tr("Unmatched '}'", "多余的 '}'")));
     }
     Ok(tidy(&out))
+}
+
+/// Environments that only wrap a displayed formula.
+const DISPLAY_ENVS: [&str; 15] = [
+    "equation", "equation*", "align", "align*", "aligned", "alignedat", "gather", "gather*", "gathered", "displaymath", "math", "split",
+    "multline", "multline*", "flalign",
+];
+
+/// Tidy formula text as it arrives from copy and paste: typographic
+/// Unicode (`−ⁿ×·≤²` …), maths delimiters (`$…$`, `$$…$$`, `\[…\]`, `\(…\)`),
+/// display environments such as `equation` or `aligned` (with their `&`),
+/// `\tag{…}`, `\label{…}`, a leading `\displaystyle` and trailing
+/// punctuation or spacing. A left-hand side such as `z =` is kept.
+pub fn clean(src: &str) -> String {
+    let mut s = strip_commands(&unicode_to_ascii(src));
+    loop {
+        let before = s.clone();
+        s = s.trim().to_string();
+        for (a, b) in [("$$", "$$"), ("$", "$"), ("\\[", "\\]"), ("\\(", "\\)")] {
+            if s.len() >= a.len() + b.len() && s.starts_with(a) && s.ends_with(b) {
+                s = s[a.len()..s.len() - b.len()].to_string();
+                break;
+            }
+        }
+        if let Some(body) = unwrap_env(s.trim()) {
+            s = body;
+        }
+        for style in ["\\displaystyle", "\\textstyle"] {
+            if let Some(rest) = s.trim_start().strip_prefix(style)
+                && !rest.starts_with(|c: char| c.is_ascii_alphabetic())
+            {
+                s = rest.to_string();
+            }
+        }
+        s = strip_trailing(&s);
+        if s == before {
+            return s;
+        }
+    }
+}
+
+/// `\begin{equation} … \end{equation}` (and the other display
+/// environments) → the body, with alignment `&` removed unless it holds a
+/// nested environment such as `cases`.
+fn unwrap_env(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("\\begin{")?;
+    let close = rest.find('}')?;
+    let env = &rest[..close];
+    if !DISPLAY_ENVS.contains(&env) {
+        return None;
+    }
+    let body = rest[close + 1..].trim_end().strip_suffix(&format!("\\end{{{env}}}"))?;
+    let body = if body.contains("\\begin{") { body.to_string() } else { body.replace('&', " ") };
+    Some(body)
+}
+
+/// Whether `s[at..]` starts with the command `cmd` (not a longer name).
+fn command_at(s: &str, at: usize, cmd: &str) -> bool {
+    s[at..].starts_with(cmd) && !s[at + cmd.len()..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '*')
+}
+
+/// Drop `\tag{…}`, `\tag*{…}`, `\label{…}`, `\nonumber` and `\notag`.
+fn strip_commands(s: &str) -> String {
+    let mut out = s.to_string();
+    for cmd in ["\\tag*", "\\tag", "\\label"] {
+        let mut from = 0;
+        while let Some(k) = out[from..].find(cmd).map(|k| k + from) {
+            let after = k + cmd.len();
+            // A longer command name, or `\tag*` when looking for `\tag`.
+            if out[after..].starts_with(|c: char| c.is_ascii_alphabetic() || (c == '*' && cmd != "\\tag*")) {
+                from = after;
+                continue;
+            }
+            let open = after + (out[after..].len() - out[after..].trim_start().len());
+            if !out[open..].starts_with('{') {
+                from = after;
+                continue;
+            }
+            let mut depth = 0;
+            let mut end = None;
+            for (j, c) in out[open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(open + j + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { break };
+            out.replace_range(k..end, " ");
+            from = k;
+        }
+    }
+    for cmd in ["\\nonumber", "\\notag"] {
+        let mut from = 0;
+        while let Some(k) = out[from..].find(cmd).map(|k| k + from) {
+            if command_at(&out, k, cmd) {
+                out.replace_range(k..k + cmd.len(), " ");
+                from = k;
+            } else {
+                from = k + cmd.len();
+            }
+        }
+    }
+    out
+}
+
+/// Remove trailing spacing commands, line breaks and sentence punctuation
+/// (but not the `.` of `\right.`).
+fn strip_trailing(s: &str) -> String {
+    let mut t = s.trim_end();
+    loop {
+        let before = t.len();
+        for suffix in ["\\qquad", "\\quad", "\\\\", "\\,", "\\;", "\\:", "\\!", "\\", "~"] {
+            if let Some(rest) = t.strip_suffix(suffix) {
+                t = rest.trim_end();
+                break;
+            }
+        }
+        if let Some(last) = t.chars().last()
+            && matches!(last, ',' | ';' | '.' | '。' | '，' | '；')
+        {
+            let rest = &t[..t.len() - last.len_utf8()];
+            let word = rest.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            // `\right.` and friends are delimiters, not punctuation.
+            if !(last == '.' && word.ends_with('\\') && word.len() < rest.len()) {
+                t = rest.trim_end();
+            }
+        }
+        if t.len() == before {
+            return t.to_string();
+        }
+    }
+}
+
+fn superscript(c: char) -> Option<char> {
+    Some(match c {
+        '⁰' => '0',
+        '¹' => '1',
+        '²' => '2',
+        '³' => '3',
+        '⁴' => '4',
+        '⁵' => '5',
+        '⁶' => '6',
+        '⁷' => '7',
+        '⁸' => '8',
+        '⁹' => '9',
+        '⁺' => '+',
+        '⁻' => '-',
+        '⁽' => '(',
+        '⁾' => ')',
+        'ⁿ' => 'n',
+        _ => return None,
+    })
+}
+
+/// Whether `src` contains typographic maths characters, i.e. was copied
+/// from a rendered formula; it is then read with LaTeX's conventions
+/// (`2xy` is a product).
+pub fn is_typeset(src: &str) -> bool {
+    src.chars().any(|c| {
+        superscript(c).is_some() || matches!(c, '−' | '×' | '·' | '⋅' | '∙' | '÷' | '≤' | '≥' | '⩽' | '⩾' | '≠' | 'π' | '√' | '\u{2061}' | '\u{2062}' | '\u{2063}')
+    })
+}
+
+/// Typographic maths characters (from rendered formulas, Word, PDFs) →
+/// what the parser reads: `−` → `-`, `x²` → `x^2`, `×` → `*`, `≤` → `<=` …
+fn unicode_to_ascii(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(d) = superscript(c) {
+            let mut run = String::from(d);
+            while let Some(e) = chars.peek().copied().and_then(superscript) {
+                run.push(e);
+                chars.next();
+            }
+            if run.chars().all(|c| c.is_ascii_digit()) && run.len() == 1 {
+                out.push('^');
+                out.push_str(&run);
+            } else {
+                // Braces: valid LaTeX, and they send the text down the LaTeX path.
+                out.push_str(&format!("^{{{run}}}"));
+            }
+            continue;
+        }
+        match c {
+            '−' | '–' | '‐' | '‒' | '－' => out.push('-'),
+            '×' | '·' | '⋅' | '∙' | '∗' => out.push('*'),
+            '÷' | '∕' => out.push('/'),
+            '≤' | '⩽' => out.push_str("<="),
+            '≥' | '⩾' => out.push_str(">="),
+            '≠' => out.push_str("!="),
+            'π' => out.push_str(" pi "),
+            '√' => out.push_str("sqrt"),
+            '（' => out.push('('),
+            '）' => out.push(')'),
+            '［' => out.push('['),
+            '］' => out.push(']'),
+            '，' => out.push(','),
+            '＝' => out.push('='),
+            '＋' => out.push('+'),
+            // MathML invisible operators: times, separator, function application.
+            '\u{2062}' => out.push('*'),
+            '\u{2063}' => out.push(','),
+            '\u{2061}' | '\u{200b}' | '\u{feff}' => {}
+            c if c != ' ' && c.is_whitespace() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Collapse runs of spaces.
@@ -151,6 +371,10 @@ fn latex_fn(name: &str) -> Option<&'static str> {
         "sgn" | "sign" => "sign",
         "max" => "max",
         "min" => "min",
+        "Re" | "re" => "re",
+        "Im" | "im" => "im",
+        "arg" | "Arg" => "arg",
+        "conj" => "conj",
         _ => return None,
     })
 }
@@ -363,6 +587,7 @@ impl Conv {
                 self.item()?
             }
             "cdot" | "times" | "ast" => "*".into(),
+            "bar" | "overline" => format!(" conj({}) ", self.arg()?),
             "div" => "/".into(),
             "pi" => " pi ".into(),
             "tau" => " tau ".into(),
@@ -423,6 +648,7 @@ impl Conv {
     fn text_words(&mut self, w: &str) -> String {
         let mut out = String::new();
         for word in w.split(|c: char| c.is_whitespace() || c == ',') {
+            let word = word.trim_matches(|c: char| matches!(c, '.' | ';' | ':' | '。' | '，' | '；' | '：'));
             match word.to_lowercase().as_str() {
                 "" | "if" | "for" | "when" | "where" | "当" | "若" | "如果" => {}
                 "and" | "且" | "并且" => out.push_str(" and "),
@@ -462,6 +688,7 @@ impl Conv {
         }
         self.skip_space();
         let arg = match self.peek() {
+            _ if self.bar_next() => self.abs_arg()?,
             Some(T::Ch('(')) | Some(T::Cmd(_)) if self.paren_next() => self.paren_arg()?,
             Some(T::Open) => format!("({})", self.group()?),
             _ => format!("({})", self.implicit_arg(name)?),
@@ -477,18 +704,49 @@ impl Conv {
         })
     }
 
-    /// Whether the next token opens a parenthesis (`(` or `\left(`).
-    fn paren_next(&self) -> bool {
-        match self.peek() {
-            Some(T::Ch('(')) => true,
-            Some(T::Cmd(c)) if matches!(c.as_str(), "left" | "bigl" | "Bigl" | "biggl" | "Biggl" | "big" | "Big") => {
-                let mut j = self.i + 1;
+    /// The token after a sizing command such as `\left` at `i`, if any.
+    fn after_sizing(&self, i: usize) -> Option<&T> {
+        match self.t.get(i) {
+            Some(T::Cmd(c)) if matches!(c.as_str(), "left" | "right" | "bigl" | "bigr" | "Bigl" | "Bigr" | "biggl" | "biggr" | "Biggl" | "Biggr" | "big" | "Big") => {
+                let mut j = i + 1;
                 while self.t.get(j) == Some(&T::Space) {
                     j += 1;
                 }
-                matches!(self.t.get(j), Some(T::Ch('(')))
+                self.t.get(j)
             }
-            _ => false,
+            t => t,
+        }
+    }
+
+    /// Whether the next token opens a parenthesis: `(`, `\{`, `\left(` …
+    fn paren_next(&self) -> bool {
+        let opens = |t: Option<&T>| matches!(t, Some(T::Ch('('))) || matches!(t, Some(T::Cmd(c)) if c == "{" || c == "lbrace");
+        opens(self.after_sizing(self.i))
+    }
+
+    /// Whether the token at `i` is a `|` (also `\left|`, `\lvert`, `\vert`).
+    fn bar_at(&self, i: usize) -> bool {
+        let bar = |t: Option<&T>| matches!(t, Some(T::Ch('|'))) || matches!(t, Some(T::Cmd(c)) if matches!(c.as_str(), "lvert" | "rvert" | "vert" | "|"));
+        bar(self.after_sizing(i))
+    }
+
+    fn bar_next(&self) -> bool {
+        self.bar_at(self.i)
+    }
+
+    /// `|…|` as a function argument (`\ln|x|`) → `(abs(…))`.
+    fn abs_arg(&mut self) -> Result<String, ParseError> {
+        self.item()?;
+        let mut inner = String::new();
+        loop {
+            if self.peek().is_none() {
+                return Err(self.err(tr("missing closing '|'", "缺少右边的 '|'")));
+            }
+            if self.bar_next() {
+                self.item()?;
+                return Ok(format!("(abs({}))", inner.trim()));
+            }
+            inner.push_str(&self.item()?);
         }
     }
 
@@ -553,21 +811,99 @@ impl Conv {
         Ok(out)
     }
 
+    /// A cases condition comparing points, `(x,y) \neq (0,0)` →
+    /// `((x)!=(0) or (y)!=(0))`; `None` (nothing consumed) for any other.
+    fn tuple_condition(&mut self) -> Result<Option<String>, ParseError> {
+        let end = (self.i..self.t.len()).find(|&j| matches!(&self.t[j], T::Cmd(c) if c == "\\" || c == "end")).unwrap_or(self.t.len());
+        let sizing = |c: &str| matches!(c, "left" | "right" | "bigl" | "bigr" | "Bigl" | "Bigr" | "big" | "Big");
+        let mut toks: Vec<T> = self.t[self.i..end].iter().filter(|t| !matches!(t, T::Space) && !matches!(t, T::Cmd(c) if sizing(c))).cloned().collect();
+        // A leading \text{if } / \text{当 }.
+        if matches!(toks.first(), Some(T::Cmd(c)) if c == "text" || c == "textrm" || c == "mbox")
+            && let Some(close) = toks.iter().position(|t| *t == T::Close)
+        {
+            let words: String = toks[..close].iter().filter_map(|t| if let T::Ch(c) = t { Some(*c) } else { None }).collect();
+            if matches!(words.trim(), "if" | "when" | "for" | "当" | "若" | "如果") {
+                toks.drain(..=close);
+            }
+        }
+        while matches!(toks.last(), Some(T::Ch(',' | '.' | ';'))) {
+            toks.pop();
+        }
+        // ( a , b , … ) op ( c , d , … )
+        fn tuple(toks: &[T], k: &mut usize) -> Option<Vec<Vec<T>>> {
+            if toks.get(*k) != Some(&T::Ch('(')) {
+                return None;
+            }
+            *k += 1;
+            let mut parts = vec![Vec::new()];
+            loop {
+                match toks.get(*k)? {
+                    T::Ch(')') => break,
+                    T::Ch(',') => parts.push(Vec::new()),
+                    T::Ch('(') => return None,
+                    t => parts.last_mut()?.push(t.clone()),
+                }
+                *k += 1;
+            }
+            *k += 1;
+            (parts.len() >= 2 && parts.iter().all(|p| !p.is_empty())).then_some(parts)
+        }
+        let mut k = 0;
+        let Some(lhs) = tuple(&toks, &mut k) else { return Ok(None) };
+        let equal = match (toks.get(k), toks.get(k + 1)) {
+            (Some(T::Ch('=')), _) => {
+                k += 1;
+                true
+            }
+            (Some(T::Ch('!')), Some(T::Ch('='))) => {
+                k += 2;
+                false
+            }
+            (Some(T::Cmd(c)), _) if c == "ne" || c == "neq" => {
+                k += 1;
+                false
+            }
+            _ => return Ok(None),
+        };
+        let Some(rhs) = tuple(&toks, &mut k) else { return Ok(None) };
+        if k != toks.len() || lhs.len() != rhs.len() {
+            return Ok(None);
+        }
+        let conv = |t: &Vec<T>| -> Result<String, ParseError> {
+            let mut c = Conv { t: t.clone(), i: 0, cond: false, otherwise: false };
+            c.seq(&|_| false)
+        };
+        let mut terms = Vec::new();
+        for (a, b) in lhs.iter().zip(&rhs) {
+            let (a, b) = (conv(a)?, conv(b)?);
+            terms.push(if equal { format!("({a})==({b})") } else { format!("({a})!=({b})") });
+        }
+        self.i = end;
+        Ok(Some(format!("({})", terms.join(if equal { " and " } else { " or " }))))
+    }
+
     /// Body of `\begin{cases}` up to and including `\end{cases}`.
     fn cases(&mut self) -> Result<String, ParseError> {
         let mut rows: Vec<(String, Option<String>)> = Vec::new();
         loop {
             let stop = |t: &T| matches!(t, T::Ch('&')) || matches!(t, T::Cmd(c) if c == "\\" || c == "end");
-            let expr = self.seq(&stop)?;
+            // Rows are often written `value, & condition.`
+            let expr = self.seq(&stop)?.trim_end().trim_end_matches([',', ';']).to_string();
             let mut cond = None;
             if self.peek() == Some(&T::Ch('&')) {
                 self.i += 1;
-                self.cond = true;
-                self.otherwise = false;
-                let c = self.seq(&|t| matches!(t, T::Cmd(c) if c == "\\" || c == "end"))?;
-                self.cond = false;
-                if !self.otherwise && !c.trim().is_empty() {
+                if let Some(c) = self.tuple_condition()? {
                     cond = Some(c);
+                } else {
+                    self.cond = true;
+                    self.otherwise = false;
+                    let c = self.seq(&|t| matches!(t, T::Cmd(c) if c == "\\" || c == "end"))?;
+                    self.cond = false;
+                    let c = c.trim().trim_end_matches(['.', ';']).trim_end();
+                    let c = c.strip_suffix("and").unwrap_or(c).trim();
+                    if !self.otherwise && !c.is_empty() {
+                        cond = Some(c.to_string());
+                    }
                 }
             }
             if !expr.trim().is_empty() {
@@ -676,6 +1012,65 @@ mod tests {
         assert_eq!(strip_lhs("f(x,y)= x"), " x");
         assert_eq!(strip_lhs("x <= 1"), "x <= 1");
         assert_eq!(strip_lhs("x + y == 1"), "x + y == 1");
+    }
+
+    /// Formulas as they come out of the clipboard: MathJax / Wikipedia,
+    /// Typora, ChatGPT, Mathpix, Word and rendered (Unicode) maths.
+    #[test]
+    fn pasted_formulas() {
+        // Delimiters, environments, tags, style commands, trailing punctuation.
+        same(r"$$z = \frac{\sin\left(\sqrt{x^2+y^2}\right)}{\sqrt{x^2+y^2}}$$", "sin(sqrt(x^2+y^2))/sqrt(x^2+y^2)");
+        same("\\[\n  f(x, y) = x^2 - y^2\n\\]", "x^2 - y^2");
+        same(r"\( f(x,y)=x^{2}y \)", "x^2*y");
+        same("z = x^2 + y^2,", "x^2 + y^2");
+        same("z = x^2 + y^2.", "x^2 + y^2");
+        same(r"z = \sqrt{1 - x^2 - y^2}\;", "sqrt(1 - x^2 - y^2)");
+        same(r"z=x^{2}+y^{2}\quad", "x^2 + y^2");
+        same(r"\displaystyle z=\frac{1}{2}xy", "x*y/2");
+        same(r"f\left(x,y\right)=x^2y", "x^2*y");
+        same(r"z = x^2 + y^2 \tag{1}", "x^2 + y^2");
+        same(r"z = x y \label{eq:1} \nonumber", "x*y");
+        same(r"\begin{equation} z = x y \end{equation}", "x*y");
+        same(r"$$\begin{aligned} z &= x y \end{aligned}$$", "x*y");
+        same(r"\left. x^2 \right.", "x^2");
+        same("x^2 +\r\n  y", "x^2 + y");
+        // Function arguments in bars and braces.
+        same(r"\ln\left|x\right| + y", "ln(abs(x)) + y");
+        same(r"\ln|x| + y", "ln(abs(x)) + y");
+        same(r"\max\{x, y\}", "max(x, y)");
+        same(r"\min\left\{x, y\right\}", "min(x, y)");
+        // Rendered maths: Unicode operators and superscripts; xy is a product.
+        same("x² − y²", "x^2 - y^2");
+        same("x^2 − 2xy", "x^2 - 2*x*y");
+        same("x⁻¹ + y³ × 2", "x^(-1) + y^3*2");
+        same("x\u{2062}y + 2\u{a0}x", "x*y + 2*x");
+        same("x² + y² ≤ 1", "x^2 + y^2 <= 1");
+        // Cases rows written `value, & condition`, and point conditions.
+        let classic = r"f(x,y)=\begin{cases} \frac{xy}{x^2+y^2}, & (x,y)\neq(0,0) \\ 0, & (x,y)=(0,0) \end{cases}";
+        same(classic, "x*y/(x^2+y^2)");
+        assert_eq!(eval(classic, 0.0, 0.0), 0.0);
+        let other = r"\begin{cases} \dfrac{xy}{x^2+y^2}, & \text{if } (x, y) \ne (0, 0), \\ 0, & \text{otherwise.} \end{cases}";
+        same(other, "x*y/(x^2+y^2)");
+        assert_eq!(eval(other, 0.0, 0.0), 0.0);
+        same(r"\begin{cases}1, & x<1\\0, & \text{otherwise}\end{cases}", "if(x < 1, 1, 0)");
+        // Complex parts and conjugates.
+        assert_eq!(to_plain(r"\bar{z}").unwrap(), "conj( z )");
+        assert_eq!(to_plain(r"\overline{z}+1").unwrap(), "conj( z ) +1");
+        assert_eq!(to_plain(r"\mathrm{Re}(z)").unwrap(), "re( z )");
+        assert_eq!(to_plain(r"\operatorname{Im} z").unwrap(), "im( z )");
+        let cz = Vars(vec!["z", "x", "y"]);
+        for src in [r"\bar{z}", r"\mathrm{Re}(z)+\operatorname{Im} z", r"\arg z", r"|z|^2"] {
+            parse(src, &mut Pool::new(), &cz, true).unwrap_or_else(|e| panic!("{src}: {e}"));
+        }
+    }
+
+    #[test]
+    fn equations_keep_their_left_side() {
+        // A pasted cone z = √(x²+y²) must stay an equation, not lose `z =`.
+        assert_eq!(to_plain_equation(r"z=\sqrt{x^2+y^2}").unwrap(), "z == sqrt( x ^(2)+ y ^(2))");
+        assert_eq!(clean("  $x^{2}+y^{2}=2x$. "), "x^{2}+y^{2}=2x");
+        assert_eq!(clean(r"x^2 \right."), r"x^2 \right.");
+        assert_eq!(clean("x² + y² = 1"), "x^2 + y^2 = 1");
     }
 }
 
