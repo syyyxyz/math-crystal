@@ -1,0 +1,196 @@
+//! What survives a restart: the formulas and inputs of each workspace and
+//! the open workspace. Views, caches and which cards are open are not kept,
+//! so every start begins with the folded default layout. Stored by eframe
+//! (RON, key [`KEY`]) in its app data file.
+//!
+//! Every field has a default, so a file written by an older or newer
+//! version still loads; nonsensical values are ignored on restore.
+
+use serde::{Deserialize, Serialize};
+
+pub const KEY: &str = "session";
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+#[serde(default)]
+pub struct Session {
+    /// "calculus", "space", "complex" or "spectrum".
+    pub workspace: String,
+    pub calc: Option<CalcState>,
+    pub space: Option<SpaceState>,
+    pub complex: Option<ComplexState>,
+    pub spectrum: Option<SpectrumState>,
+}
+
+/// A parameter slider.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct ParamState {
+    pub name: String,
+    pub value: f64,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct CalcState {
+    pub src: String,
+    pub xr: (f64, f64),
+    pub yr: (f64, f64),
+    pub zr: (f64, f64),
+    pub z_auto: bool,
+    /// The point P(a, b).
+    pub a: f64,
+    pub b: f64,
+    pub region: String,
+    pub use_region: bool,
+    pub params: Vec<ParamState>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct ComplexState {
+    pub src: String,
+    /// Centre and half-extent of the z-plane view.
+    pub center: (f64, f64),
+    pub half: f64,
+    pub params: Vec<ParamState>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct SpectrumState {
+    pub src: String,
+    pub params: Vec<ParamState>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct SpaceState {
+    pub objects: Vec<ObjectState>,
+    pub xr: (f64, f64),
+    pub yr: (f64, f64),
+    pub zr: (f64, f64),
+    pub equal: bool,
+    pub params: Vec<ParamState>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct ObjectState {
+    /// "surface", "curve" or "solid".
+    pub kind: String,
+    pub src: String,
+    pub solid: SolidState,
+    pub color: usize,
+    pub opacity: f32,
+    pub visible: bool,
+    pub lines: bool,
+    pub t_range: (f64, f64),
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct SolidState {
+    /// "ball", "cylinder", "cone" or "box".
+    pub kind: String,
+    pub anchor: [f64; 3],
+    pub axis: usize,
+    pub radius: f64,
+    pub height: f64,
+    pub size: [f64; 3],
+}
+
+/// A usable axis range: finite with lo < hi.
+pub fn range_ok(r: (f64, f64)) -> bool {
+    r.0.is_finite() && r.1.is_finite() && r.0 < r.1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_or_partial_files_still_load() {
+        let s: Session = ron::from_str(r#"(workspace: "space", calc: Some((src: "x*y")))"#).unwrap();
+        assert_eq!(s.workspace, "space");
+        assert_eq!(s.calc.unwrap().src, "x*y");
+        assert!(s.space.is_none());
+        let s: Session = ron::from_str(r#"(future_field: 3, workspace: "complex")"#).unwrap_or_default();
+        assert!(s.workspace == "complex" || s.workspace.is_empty());
+    }
+
+    /// Through RON text, as eframe stores it.
+    fn via_ron(s: &Session) -> Session {
+        ron::from_str(&ron::to_string(s).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn workspaces_round_trip() {
+        // Calculus: formula with a parameter, ranges, P, region.
+        let mut st = crate::app::CalcWorkspace::new("a*x^2 - y").state();
+        st.params[0].value = 2.5;
+        (st.xr, st.yr, st.zr, st.z_auto) = ((-1.0, 4.0), (-2.0, 2.0), (-5.0, 9.0), false);
+        (st.a, st.b) = (0.5, -0.25);
+        (st.region, st.use_region) = ("x^2 + y^2 <= 4".into(), true);
+        let saved = via_ron(&Session { calc: Some(st.clone()), ..Default::default() });
+        let mut calc = crate::app::CalcWorkspace::new("x");
+        calc.restore(saved.calc.unwrap());
+        assert_eq!(calc.state(), st);
+
+        // Space: a surface with a parameter, a curve and a solid.
+        let mut space = crate::space_app::SpaceWorkspace::new();
+        let mut st = space.state();
+        st.objects.truncate(1);
+        st.objects[0].src = "z = k*x + 1".into();
+        // (A surface or curve carries the preset solid it would switch to.)
+        let preset = st.objects[0].solid.clone();
+        st.objects.push(ObjectState { kind: "curve".into(), src: "(t, 1, t)".into(), solid: preset, color: 3, opacity: 0.6, visible: false, lines: false, t_range: (-2.0, 3.0) });
+        st.objects.push(ObjectState {
+            kind: "solid".into(),
+            solid: SolidState { kind: "cone".into(), anchor: [0.0, 0.0, -1.5], axis: 1, radius: 1.5, height: 3.0, size: [1.0, 1.0, 1.0] },
+            color: 1,
+            opacity: 0.75,
+            visible: true,
+            t_range: (-1.0, 1.0),
+            ..Default::default()
+        });
+        st.params = vec![ParamState { name: "k".into(), value: -0.75, lo: -2.0, hi: 2.0 }];
+        (st.xr, st.equal) = ((-4.0, 2.0), false);
+        let saved = via_ron(&Session { space: Some(st.clone()), ..Default::default() });
+        space.restore(saved.space.unwrap());
+        assert_eq!(space.state(), st);
+
+        // Complex and spectrum.
+        let mut st = crate::complex_app::ComplexWorkspace::new("1/(z - c)").state();
+        st.params[0].value = 0.5;
+        (st.center, st.half) = ((1.0, -0.5), 2.5);
+        let mut complex = crate::complex_app::ComplexWorkspace::new("z");
+        complex.restore(via_ron(&Session { complex: Some(st.clone()), ..Default::default() }).complex.unwrap());
+        assert_eq!(complex.state(), st);
+        let st = SpectrumState { src: "exp(-a*t^2)".into(), params: vec![ParamState { name: "a".into(), value: 3.0, lo: 0.0, hi: 5.0 }] };
+        let mut spec = crate::spectrum_app::SpectrumWorkspace::new("t");
+        spec.restore(st.clone());
+        assert_eq!(spec.state(), st);
+    }
+
+    #[test]
+    fn nonsense_values_are_ignored() {
+        let mut calc = crate::app::CalcWorkspace::new("x*y");
+        let before = calc.state();
+        calc.restore(CalcState { src: String::new(), xr: (f64::NAN, 1.0), yr: (3.0, -3.0), zr: (0.0, 0.0), z_auto: false, a: f64::INFINITY, ..Default::default() });
+        let after = calc.state();
+        assert_eq!((after.src, after.xr, after.yr, after.a), (before.src, before.xr, before.yr, before.a));
+        assert!(after.z_auto);
+        let mut space = crate::space_app::SpaceWorkspace::new();
+        let st = SpaceState {
+            objects: vec![ObjectState { kind: "teapot".into(), ..Default::default() }, ObjectState { kind: "surface".into(), src: "x = 1".into(), color: 99, opacity: f32::NAN, ..Default::default() }],
+            ..Default::default()
+        };
+        space.restore(st);
+        let after = space.state();
+        assert_eq!(after.objects.len(), 1);
+        assert!(after.objects[0].color < crate::space::object::COLORS.len());
+        assert!(after.objects[0].opacity > 0.0);
+    }
+}

@@ -81,7 +81,7 @@ impl MathCrystal {
             egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba),
             egui::TextureOptions::LINEAR,
         );
-        Self {
+        let mut app = Self {
             workspace: Workspace::Calculus,
             calc: CalcWorkspace::new(DEFAULT_FUNCTION),
             space: crate::space_app::SpaceWorkspace::default(),
@@ -89,6 +89,48 @@ impl MathCrystal {
             spectrum: crate::spectrum_app::SpectrumWorkspace::default(),
             logo: Some(logo),
             show_help: false,
+        };
+        if let Some(saved) = cc.storage.and_then(|s| eframe::get_value::<crate::session::Session>(s, crate::session::KEY)) {
+            app.restore(saved);
+        }
+        app
+    }
+
+    /// Formulas and inputs of every workspace, for the next start.
+    pub fn session(&self) -> crate::session::Session {
+        crate::session::Session {
+            workspace: match self.workspace {
+                Workspace::Calculus => "calculus",
+                Workspace::Space => "space",
+                Workspace::Complex => "complex",
+                Workspace::Spectrum => "spectrum",
+            }
+            .into(),
+            calc: Some(self.calc.state()),
+            space: Some(self.space.state()),
+            complex: Some(self.complex.state()),
+            spectrum: Some(self.spectrum.state()),
+        }
+    }
+
+    pub fn restore(&mut self, s: crate::session::Session) {
+        self.workspace = match s.workspace.as_str() {
+            "space" => Workspace::Space,
+            "complex" => Workspace::Complex,
+            "spectrum" => Workspace::Spectrum,
+            _ => Workspace::Calculus,
+        };
+        if let Some(c) = s.calc {
+            self.calc.restore(c);
+        }
+        if let Some(c) = s.space {
+            self.space.restore(c);
+        }
+        if let Some(c) = s.complex {
+            self.complex.restore(c);
+        }
+        if let Some(c) = s.spectrum {
+            self.spectrum.restore(c);
         }
     }
 
@@ -260,6 +302,13 @@ impl eframe::App for MathCrystal {
         storage.set_string("lang", (if i18n::zh() { "zh" } else { "en" }).into());
         let dark = self.calc.settings_mut().theme == Theme::Dark;
         storage.set_string("theme", (if dark { "dark" } else { "light" }).into());
+        eframe::set_value(storage, crate::session::KEY, &self.session());
+    }
+
+    /// Save only when the window closes (eframe always does that); no
+    /// periodic saves while working.
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::MAX
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
@@ -383,6 +432,47 @@ impl CalcWorkspace {
     pub fn relocalize(&mut self) {
         self.recompile();
         self.int_key = None;
+    }
+
+    /// The inputs worth keeping across restarts.
+    pub fn state(&self) -> crate::session::CalcState {
+        let st = &self.settings;
+        crate::session::CalcState {
+            src: self.src.clone(),
+            xr: st.xr,
+            yr: st.yr,
+            zr: st.zr,
+            z_auto: self.z_auto,
+            a: st.a,
+            b: st.b,
+            region: self.region_src.clone(),
+            use_region: self.use_region,
+            params: self.params.state(),
+        }
+    }
+
+    pub fn restore(&mut self, s: crate::session::CalcState) {
+        use crate::session::range_ok;
+        if range_ok(s.xr) && range_ok(s.yr) {
+            self.settings.xr = s.xr;
+            self.settings.yr = s.yr;
+        }
+        self.z_auto = s.z_auto || !range_ok(s.zr);
+        if range_ok(s.zr) {
+            self.settings.zr = s.zr;
+        }
+        if s.a.is_finite() && s.b.is_finite() {
+            self.settings.a = s.a;
+            self.settings.b = s.b;
+        }
+        if !s.region.trim().is_empty() {
+            self.region_src = s.region;
+            self.use_region = s.use_region;
+        }
+        self.params.restore(&s.params);
+        if !s.src.trim().is_empty() {
+            self.set_function(&s.src);
+        }
     }
 
     pub fn settings_mut(&mut self) -> &mut Settings {

@@ -13,6 +13,7 @@
 - **复变函数**：定义域着色、|f| 起伏曲面、映射网格；解析性检验、零点与极点、留数、围道积分。
 - **频谱**：给出绝对可积的 f(t)，画出傅里叶频谱、带限重构，演示采样与 DFT。
 - 未知的单个字母自动变成参数滑块，可播放动画；视图可导出 PNG（保存在「图片/Math-crystal」）。
+- 关闭后再打开，各工作区的公式、参数值、范围和空间几何里的对象都会恢复，并回到上次所在的工作区。
 
 | 空间几何 | 复变函数 | 频谱 |
 |---|---|---|
@@ -71,7 +72,7 @@ Linux 上编译需要 `libxkbcommon` 和 `wayland` 的开发文件（Arch 已自
 - **Complex functions** — domain colouring, |f| relief, mapping grids; holomorphy check, zeros and poles, residues, contour integrals.
 - **Spectrum** — Fourier spectrum of an absolutely integrable f(t), band-limited reconstruction, sampling and the DFT.
 
-Unknown single letters become parameter sliders (with play). Views export as PNG to `Pictures/Math-crystal`.
+Unknown single letters become parameter sliders (with play). Views export as PNG to `Pictures/Math-crystal`. Formulas, parameter values, ranges and space objects are restored at the next start.
 
 **Install** — from [Releases](../../releases): unzip `math-crystal-<version>-windows-x86_64.zip` and run `math-crystal.exe` (the binary is unsigned, so SmartScreen may ask: *More info → Run anyway*). If it cannot start, it shows the error (also saved to `%LOCALAPPDATA%\Math-crystal\crash.log`) and, when the graphics back end is at fault, offers to restart on OpenGL; that choice is kept in `backend.txt` next to the log — delete it to go back to the default; on Arch install `math-crystal` or `math-crystal-bin` from the AUR; on other Linux distributions unpack the `.tar.gz` and run `math-crystal`. A GPU driver with Vulkan, DirectX 12 or OpenGL ES 3 is required. The integrated GPU is used by default; set `WGPU_POWER_PREF=high` to use the discrete one.
 

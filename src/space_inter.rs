@@ -253,7 +253,7 @@ impl Inter {
             "s_inter",
             icon::INTEGRAL,
             tr("Intersections", "交点与交线"),
-            true,
+            false,
             |ui| {
                 eye(ui, &mut show, tr("Show intersection curves and points", "显示交线与交点"));
             },

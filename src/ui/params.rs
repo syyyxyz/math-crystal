@@ -53,6 +53,21 @@ impl Params {
         }
     }
 
+    /// Names, values and ranges, for the saved session.
+    pub fn state(&self) -> Vec<crate::session::ParamState> {
+        self.items.iter().map(|p| crate::session::ParamState { name: p.name.clone(), value: p.value, lo: p.lo, hi: p.hi }).collect()
+    }
+
+    /// Put back saved sliders (not playing). Call before the formula is
+    /// parsed: [`Self::sync`] then keeps the values of names still in use.
+    pub fn restore(&mut self, saved: &[crate::session::ParamState]) {
+        self.items = saved
+            .iter()
+            .filter(|p| !p.name.is_empty() && p.value.is_finite() && crate::session::range_ok((p.lo, p.hi)))
+            .map(|p| Param { name: p.name.clone(), value: p.value.clamp(p.lo, p.hi), lo: p.lo, hi: p.hi, playing: false, dir: 1.0 })
+            .collect();
+    }
+
     pub fn values(&self) -> Vec<f64> {
         self.items.iter().map(|p| p.value).collect()
     }

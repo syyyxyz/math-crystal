@@ -198,6 +198,18 @@ impl SpectrumWorkspace {
         self.recompile();
     }
 
+    /// The inputs worth keeping across restarts.
+    pub fn state(&self) -> crate::session::SpectrumState {
+        crate::session::SpectrumState { src: self.src.clone(), params: self.params.state() }
+    }
+
+    pub fn restore(&mut self, s: crate::session::SpectrumState) {
+        self.params.restore(&s.params);
+        if !s.src.trim().is_empty() {
+            self.set_function(&s.src);
+        }
+    }
+
     fn recompile(&mut self) {
         match Signal::new(self.src.trim()) {
             Ok(mut s) => {

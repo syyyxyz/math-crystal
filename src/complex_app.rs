@@ -224,6 +224,26 @@ impl ComplexWorkspace {
         self.recompile();
     }
 
+    /// The inputs worth keeping across restarts.
+    pub fn state(&self) -> crate::session::ComplexState {
+        crate::session::ComplexState {
+            src: self.src.clone(),
+            center: (self.plane.center.re, self.plane.center.im),
+            half: self.plane.half,
+            params: self.params.state(),
+        }
+    }
+
+    pub fn restore(&mut self, s: crate::session::ComplexState) {
+        if s.center.0.is_finite() && s.center.1.is_finite() && s.half.is_finite() && s.half > 0.0 {
+            self.plane = Plane::new(C64::new(s.center.0, s.center.1), s.half);
+        }
+        self.params.restore(&s.params);
+        if !s.src.trim().is_empty() {
+            self.set_function(&s.src);
+        }
+    }
+
     fn recompile(&mut self) {
         match CFunc::new(self.src.trim()) {
             Ok(mut f) => {

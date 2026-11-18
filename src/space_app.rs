@@ -101,6 +101,9 @@ impl Quality {
 pub struct SpaceWorkspace {
     objects: Vec<Object>,
     next_uid: u32,
+    /// Objects with a smaller uid were there at start-up: their cards
+    /// start folded; objects added later open.
+    fold_below: u32,
     params: Params,
     /// Box ranges.
     xr: (f64, f64),
@@ -164,6 +167,7 @@ impl SpaceWorkspace {
         let mut s = Self {
             objects: Vec::new(),
             next_uid: 1,
+            fold_below: 0,
             params: Params::default(),
             xr: (-3.0, 3.0),
             yr: (-3.0, 3.0),
@@ -188,7 +192,99 @@ impl SpaceWorkspace {
         };
         let first = scenes().swap_remove(0);
         s.set_objects(first.2);
+        s.fold_below = s.next_uid;
         s
+    }
+
+    /// The inputs worth keeping across restarts.
+    pub fn state(&self) -> crate::session::SpaceState {
+        use crate::session::{ObjectState, SolidState};
+        let objects = self
+            .objects
+            .iter()
+            .map(|o| ObjectState {
+                kind: match o.kind {
+                    Kind::Surface => "surface",
+                    Kind::Curve => "curve",
+                    Kind::Solid => "solid",
+                }
+                .into(),
+                src: o.src.clone(),
+                solid: SolidState {
+                    kind: match o.solid.kind {
+                        SolidKind::Ball => "ball",
+                        SolidKind::Cylinder => "cylinder",
+                        SolidKind::Cone => "cone",
+                        SolidKind::Cuboid => "box",
+                    }
+                    .into(),
+                    anchor: o.solid.anchor.to_array(),
+                    axis: o.solid.axis,
+                    radius: o.solid.radius,
+                    height: o.solid.height,
+                    size: o.solid.size.to_array(),
+                },
+                color: o.color,
+                opacity: o.opacity,
+                visible: o.visible,
+                lines: o.lines,
+                t_range: o.t_range,
+            })
+            .collect();
+        crate::session::SpaceState { objects, xr: self.xr, yr: self.yr, zr: self.zr, equal: self.equal, params: self.params.state() }
+    }
+
+    /// Put back a saved scene; its object cards start folded.
+    pub fn restore(&mut self, s: crate::session::SpaceState) {
+        use crate::session::range_ok;
+        if range_ok(s.xr) && range_ok(s.yr) && range_ok(s.zr) {
+            (self.xr, self.yr, self.zr) = (s.xr, s.yr, s.zr);
+            self.equal = s.equal;
+        }
+        let finite3 = |v: [f64; 3]| v.iter().all(|c| c.is_finite());
+        let objects: Vec<Object> = s
+            .objects
+            .into_iter()
+            .filter_map(|o| {
+                let color = o.color % COLORS.len();
+                let mut obj = match o.kind.as_str() {
+                    "surface" => Object::new(Kind::Surface, &o.src, color),
+                    "curve" => Object::new(Kind::Curve, &o.src, color),
+                    "solid" => {
+                        let so = &o.solid;
+                        let kind = match so.kind.as_str() {
+                            "ball" => SolidKind::Ball,
+                            "cylinder" => SolidKind::Cylinder,
+                            "cone" => SolidKind::Cone,
+                            "box" => SolidKind::Cuboid,
+                            _ => return None,
+                        };
+                        let mut solid = Solid::preset(kind);
+                        if finite3(so.anchor) && finite3(so.size) && so.radius.is_finite() && so.height.is_finite() && so.axis < 3 {
+                            solid.anchor = DVec3::from_array(so.anchor);
+                            solid.axis = so.axis;
+                            solid.radius = so.radius;
+                            solid.height = so.height;
+                            solid.size = DVec3::from_array(so.size);
+                        }
+                        Object::solid(solid, color)
+                    }
+                    _ => return None,
+                };
+                if o.opacity.is_finite() && o.opacity > 0.0 {
+                    obj.opacity = o.opacity.clamp(0.15, 1.0);
+                }
+                obj.visible = o.visible;
+                obj.lines = o.lines;
+                if range_ok(o.t_range) {
+                    obj.t_range = o.t_range;
+                }
+                Some(obj)
+            })
+            .collect();
+        self.params.restore(&s.params);
+        self.set_objects(objects);
+        self.fold_below = self.next_uid;
     }
 
     /// Replace all objects (examples, preview).
@@ -316,7 +412,7 @@ impl SpaceWorkspace {
             "s_scene",
             icon::CUBE,
             tr("Scene", "场景"),
-            true,
+            false,
             |ui| {
                 ui.menu_button(with_icon(icon::BOOK, tr("Examples", "示例")), |ui| {
                     ui.set_min_width(300.0);
@@ -364,7 +460,8 @@ impl SpaceWorkspace {
         let mut remove = None;
         let mut resync = false;
         for k in 0..self.objects.len() {
-            let (gone, changed) = object_card(ui, &t, k, &mut self.objects[k]);
+            let open = self.objects[k].uid >= self.fold_below;
+            let (gone, changed) = object_card(ui, &t, k, &mut self.objects[k], open);
             if gone {
                 remove = Some(k);
             }
@@ -620,7 +717,7 @@ pub(crate) fn short_name(o: &Object) -> String {
 }
 
 /// One object's card. Returns (removed, parameters may have changed).
-fn object_card(ui: &mut Ui, t: &Tokens, k: usize, o: &mut Object) -> (bool, bool) {
+fn object_card(ui: &mut Ui, t: &Tokens, k: usize, o: &mut Object, default_open: bool) -> (bool, bool) {
     let mut visible = o.visible;
     let mut remove = false;
     let mut changed = false;
@@ -635,7 +732,7 @@ fn object_card(ui: &mut Ui, t: &Tokens, k: usize, o: &mut Object) -> (bool, bool
         &format!("s_obj_{}", o.uid),
         ic,
         &title,
-        true,
+        default_open,
         |ui| {
             if ui.add(egui::Button::new(RichText::new("✕").size(13.0).color(t.muted)).frame(false)).on_hover_text(tr("Remove this object", "删除这个对象")).clicked() {
                 remove = true;
