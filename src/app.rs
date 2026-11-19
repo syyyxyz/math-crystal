@@ -278,6 +278,8 @@ impl MathCrystal {
                     row(ui, "(t - sin(t), 1 - cos(t))", tr("Parametric in t, with its own range", "参数方程（参数 t，可设范围）"));
                     row(ui, "x^2 + y^2 <= 4, y >= x", tr("Region; strict inequalities have dashed edges", "区域；严格不等式的边界为虚线"));
                     row(ui, tr("Click a curve", "单击曲线"), tr("Point with tangent, normal and circle of curvature", "选点，显示切线、法线与曲率圆"));
+                    row(ui, tr("Shift + click", "Shift + 单击"), tr("A point Q and the tangents through it", "放置点 Q，画出过 Q 的切线"));
+                    row(ui, tr("Layers", "图层"), tr("Asymptotes, tangent at the cursor, rectangular or polar grid", "渐近线、跟随切线、直角或极坐标网格"));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(tr("Space geometry", "空间几何")).strong());

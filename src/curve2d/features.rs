@@ -501,56 +501,218 @@ fn diverges(v: &[f64]) -> bool {
     d1 >= 0.5 * d0 && v[n - 1] > v[0] + 3.0
 }
 
-/// Asymptotes of y = f(x): vertical ones at the breaks and ends found by
-/// the sampler (in the window), horizontal or oblique ones at ±∞.
-pub fn asymptotes(def: &Def, events: &[Event], f: &Frame2) -> Vec<Asym> {
+/// The line that points running off to infinity approach, if any:
+/// `ps` are points along one branch, each farther out than the last.
+/// The direction is taken from the last chord and the offset must settle.
+fn limit_line(ps: &[[f64; 2]]) -> Option<Asym> {
+    let n = ps.len();
+    if n < 4 || ps.iter().any(|p| !(p[0].is_finite() && p[1].is_finite())) {
+        return None;
+    }
+    let norms: Vec<f64> = ps.iter().map(|p| p[0].hypot(p[1])).collect();
+    if !diverges(&norms) {
+        return None;
+    }
+    let chord = |a: [f64; 2], b: [f64; 2]| {
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let l = d[0].hypot(d[1]);
+        [d[0] / l, d[1] / l]
+    };
+    let (d1, d2) = (chord(ps[n - 3], ps[n - 2]), chord(ps[n - 2], ps[n - 1]));
+    if !(d2[0].is_finite() && d2[1].is_finite()) || (d1[0] * d2[1] - d1[1] * d2[0]).abs() > 1e-5 {
+        return None;
+    }
+    // Unit normal; the line is n·p = c.
+    let nrm = [-d2[1], d2[0]];
+    let c: Vec<f64> = ps[n - 3..].iter().map(|p| nrm[0] * p[0] + nrm[1] * p[1]).collect();
+    let cs = c[2];
+    if (c[2] - c[1]).abs() > 1e-4 * (1.0 + cs.abs()) || (c[1] - c[0]).abs() > 1e-2 * (1.0 + cs.abs()) {
+        return None;
+    }
+    let clean = |v: f64, tol: f64| {
+        let v = snap(v, tol);
+        if v.abs() < tol { 0.0 } else { v }
+    };
+    if nrm[1].abs() < 1e-7 {
+        let x = cs / nrm[0];
+        return Some(Asym::Vertical(clean(x, 1e-6 * (1.0 + x.abs()))));
+    }
+    let (k, b) = (-nrm[0] / nrm[1], cs / nrm[1]);
+    Some(Asym::Line { k: clean(k, 1e-6 * (1.0 + k.abs())), b: clean(b, 1e-5 * (1.0 + b.abs())) })
+}
+
+fn same_line(a: &Asym, b: &Asym) -> bool {
+    match (a, b) {
+        (Asym::Vertical(x), Asym::Vertical(y)) => (x - y).abs() <= 1e-6 * (1.0 + x.abs()),
+        (Asym::Line { k: k1, b: b1 }, Asym::Line { k: k2, b: b2 }) => (k1 - k2).abs() <= 1e-6 * (1.0 + k1.abs()) && (b1 - b2).abs() <= 1e-5 * (1.0 + b1.abs()),
+        _ => false,
+    }
+}
+
+fn push_line(out: &mut Vec<Asym>, a: Option<Asym>) {
+    if let Some(a) = a
+        && !out.iter().any(|b| same_line(&a, b))
+    {
+        out.push(a);
+    }
+}
+
+/// Asymptotes of a path: at the breaks and ends the sampler found (where
+/// the curve runs off to infinity on either side) and, for graphs and
+/// parametric curves, as the parameter goes to ±∞. `span` is the length
+/// of the sampled parameter range.
+pub fn path_asymptotes(def: &Def, events: &[Event], span: f64) -> Vec<Asym> {
     let mut out: Vec<Asym> = Vec::new();
-    if def.form != Form::FnX {
+    if !def.form.is_path() || !(span > 0.0) {
         return out;
     }
-    let w = f.x1 - f.x0;
-    let fx = |xs: &[f64]| def.path(xs)[1].clone();
+    let pts = |us: &[f64]| -> Vec<[f64; 2]> {
+        let [x, y] = def.path(us);
+        x.into_iter().zip(y).map(|(a, b)| [a, b]).collect()
+    };
     let mut seen: Vec<f64> = Vec::new();
     for e in events {
         let u = match e {
             Event::Break(u) | Event::Edge(u) => *u,
         };
-        if !(u > f.x0 && u < f.x1) || seen.iter().any(|s| (s - u).abs() < 1e-6 * w) || seen.len() > 2 * MAX_EACH {
+        if seen.iter().any(|s| (s - u).abs() < 1e-6 * span) || seen.len() > 2 * MAX_EACH {
             continue;
         }
         seen.push(u);
-        let any = [-1.0, 1.0].iter().any(|s| {
-            let xs: Vec<f64> = (2..=8).map(|k| u + s * w * 10f64.powi(-k)).collect();
-            let v: Vec<f64> = fx(&xs).iter().map(|v| v.abs()).collect();
-            diverges(&v)
-        });
-        if any {
-            out.push(Asym::Vertical(snap(u, 1e-7 * w)));
+        for s in [-1.0, 1.0] {
+            let us: Vec<f64> = (2..=9).map(|k| u + s * span * 10f64.powi(-k)).collect();
+            push_line(&mut out, limit_line(&pts(&us)));
         }
     }
-    for s in [1.0, -1.0] {
-        let xs: Vec<f64> = (3..=8).map(|j| s * 10f64.powi(j)).collect();
-        let v = fx(&xs);
-        if v.iter().any(|y| !y.is_finite()) {
-            continue;
+    if def.form != Form::Polar {
+        for s in [1.0, -1.0] {
+            let us: Vec<f64> = (2..=8).map(|j| s * 10f64.powi(j)).collect();
+            push_line(&mut out, limit_line(&pts(&us)));
         }
-        let k: Vec<f64> = v.iter().zip(&xs).map(|(y, x)| y / x).collect();
-        let k8 = k[5];
-        if (k[5] - k[4]).abs() > 1e-6 * (1.0 + k8.abs()) || (k[4] - k[3]).abs() > 1e-4 * (1.0 + k8.abs()) {
-            continue;
+    }
+    out
+}
+
+/// Asymptotes of an implicit curve: where it crosses ever larger circles,
+/// followed out from circle to circle.
+pub fn field_asymptotes(def: &Def, f: &Frame2) -> Vec<Asym> {
+    let mut out: Vec<Asym> = Vec::new();
+    if def.form != Form::Implicit {
+        return out;
+    }
+    let scale = (f.x1 - f.x0).abs().max((f.y1 - f.y0).abs()).max(1.0);
+    let radii: Vec<f64> = (3..=8).map(|j| scale * 10f64.powi(j)).collect();
+    let n = 7200;
+    let phis = linspace(0.0, std::f64::consts::TAU, n);
+    let mut tr_ = false;
+    let crossings: Vec<Vec<f64>> = radii
+        .iter()
+        .map(|&r| {
+            let h = |ph: &[f64]| {
+                let xs: Vec<f64> = ph.iter().map(|a| r * a.cos()).collect();
+                let ys: Vec<f64> = ph.iter().map(|a| r * a.sin()).collect();
+                def.field(&xs, &ys)
+            };
+            let vals = h(&phis);
+            roots(&h, &phis, &vals, &mut tr_).into_iter().filter(|r| r.valid).map(|r| r.u).take(64).collect()
+        })
+        .collect();
+    let base = crossings.len() / 2;
+    for &ph0 in &crossings[base] {
+        let mut pts = Vec::new();
+        for (k, list) in crossings.iter().enumerate() {
+            let near = list.iter().copied().min_by(|a, b| {
+                let d = |x: f64| (x - ph0 + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+                d(*a).abs().total_cmp(&d(*b).abs())
+            });
+            match near {
+                Some(ph) if ((ph - ph0 + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI).abs() < 0.05 => {
+                    pts.push([radii[k] * ph.cos(), radii[k] * ph.sin()]);
+                }
+                _ => break,
+            }
         }
-        let kk = if k8.abs() < 1e-7 { 0.0 } else { snap(k8, 1e-6 * (1.0 + k8.abs())) };
-        // b from moderate x, where f(x) − kx loses fewer digits.
-        let b: Vec<f64> = (0..4).map(|j| v[j] - kk * xs[j]).collect();
-        let b6 = b[3];
-        if (b[3] - b[2]).abs() > 1e-4 * (1.0 + b6.abs()) || (b[2] - b[1]).abs() > 1e-2 * (1.0 + b6.abs()) {
-            continue;
+        if pts.len() == radii.len() {
+            push_line(&mut out, limit_line(&pts));
         }
-        let bb = snap(b6, 1e-4 * (1.0 + b6.abs()));
-        let bb = if bb.abs() < 1e-6 { 0.0 } else { bb };
-        let a = Asym::Line { k: kk, b: bb };
-        if !out.contains(&a) {
-            out.push(a);
+    }
+    out
+}
+
+/// A point where a line through an outside point touches the curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Touch {
+    pub p: [f64; 2],
+    /// Unit tangent direction at p.
+    pub dir: [f64; 2],
+}
+
+/// Tangent lines through `q`: the points of the curve whose tangent passes
+/// through q. Paths are searched over [u0, u1]; implicit curves along
+/// their drawn polylines.
+pub fn tangents_from(def: &Def, q: [f64; 2], u0: f64, u1: f64, lines: &[Vec<[f64; 2]>], f: &Frame2) -> Vec<Touch> {
+    let mut out: Vec<Touch> = Vec::new();
+    let add = |p: [f64; 2], d: [f64; 2], out: &mut Vec<Touch>| {
+        let l = d[0].hypot(d[1]);
+        if !(l > 0.0 && l.is_finite() && p[0].is_finite() && p[1].is_finite()) || out.iter().any(|t| f.dist(t.p, p) < 0.5) || out.len() >= 2 * MAX_EACH {
+            return;
+        }
+        out.push(Touch { p, dir: [d[0] / l, d[1] / l] });
+    };
+    if def.form.is_path() && u1 > u0 {
+        // (P − q) × P′ = 0.
+        let h = |u: &[f64]| -> Vec<f64> {
+            let [x, y] = def.path(u);
+            let [dx, dy] = def.path_d1(u);
+            (0..u.len()).map(|i| (x[i] - q[0]) * dy[i] - (y[i] - q[1]) * dx[i]).collect()
+        };
+        let us = linspace(u0, u1, N);
+        let vals = h(&us);
+        // Cusps (x′ = y′ = 0) satisfy the condition trivially: skip them.
+        let [dx, dy] = def.path_d1(&us);
+        let speed = median((0..us.len()).map(|k| dx[k].hypot(dy[k])).collect());
+        let mut tr_ = false;
+        for r in roots(&h, &us, &vals, &mut tr_) {
+            if r.valid {
+                let pp = def.path_at(r.u);
+                if pp[2].hypot(pp[3]) > 1e-6 * speed {
+                    add([pp[0], pp[1]], [pp[2], pp[3]], &mut out);
+                }
+            }
+        }
+    } else if def.form == Form::Implicit {
+        // F = 0 and ∇F · (p − q) = 0.
+        let reach = 6.0 / f.kx.min(f.ky);
+        let sys = |x: f64, y: f64| {
+            let [ff, fx, fy, fxx, fxy, fyy] = def.field_hess(x, y);
+            let (dx, dy) = (x - q[0], y - q[1]);
+            ([ff, fx * dx + fy * dy], [[fx, fy], [fxx * dx + fxy * dy + fx, fxy * dx + fyy * dy + fy]])
+        };
+        // Singular points (∇F = 0) satisfy the condition trivially: skip them.
+        let (ax, ay): (Vec<f64>, Vec<f64>) = lines.iter().flatten().map(|p| (p[0], p[1])).unzip();
+        let [_, agx, agy] = def.field_grad(&ax, &ay);
+        let gscale = median((0..ax.len()).map(|k| agx[k].hypot(agy[k])).collect());
+        for l in lines {
+            if l.len() < 2 {
+                continue;
+            }
+            let xs: Vec<f64> = l.iter().map(|p| p[0]).collect();
+            let ys: Vec<f64> = l.iter().map(|p| p[1]).collect();
+            let [_, gx, gy] = def.field_grad(&xs, &ys);
+            let g: Vec<f64> = (0..l.len()).map(|i| gx[i] * (xs[i] - q[0]) + gy[i] * (ys[i] - q[1])).collect();
+            for i in 0..l.len() - 1 {
+                if !(g[i].is_finite() && g[i + 1].is_finite() && g[i] * g[i + 1] <= 0.0 && g[i] != g[i + 1]) {
+                    continue;
+                }
+                let t = g[i] / (g[i] - g[i + 1]);
+                let p0 = [xs[i] + t * (xs[i + 1] - xs[i]), ys[i] + t * (ys[i + 1] - ys[i])];
+                if let Some(p) = newton2(&sys, p0, reach) {
+                    let [_, fx, fy] = def.field_grad(&[p[0]], &[p[1]]);
+                    if fx[0].hypot(fy[0]) > 1e-4 * gscale {
+                        add(p, [fy[0], -fx[0]], &mut out);
+                    }
+                }
+            }
         }
     }
     out
@@ -722,23 +884,87 @@ mod tests {
 
     #[test]
     fn asymptotes_of_rational_and_log() {
-        let d = Def::new("y = (x^2 + 1)/(x - 1)").unwrap();
         let fr = frame();
-        let eval = |u: &[f64]| d.path(u);
-        let s = sample(&eval, fr.x0, fr.x1, 960, &fr);
-        let a = asymptotes(&d, &s.events, &fr);
+        let asy = |src: &str| {
+            let d = Def::new(src).unwrap();
+            let eval = |u: &[f64]| d.path(u);
+            let s = sample(&eval, fr.x0, fr.x1, 960, &fr);
+            path_asymptotes(&d, &s.events, fr.x1 - fr.x0)
+        };
+        let a = asy("y = (x^2 + 1)/(x - 1)");
         assert!(a.contains(&Asym::Vertical(1.0)), "{a:?}");
         assert!(a.contains(&Asym::Line { k: 1.0, b: 1.0 }), "{a:?}");
-        let d = Def::new("y = ln(x)").unwrap();
-        let eval = |u: &[f64]| d.path(u);
-        let s = sample(&eval, fr.x0, fr.x1, 960, &fr);
-        let a = asymptotes(&d, &s.events, &fr);
-        assert_eq!(a.len(), 1, "{a:?}");
-        assert!(matches!(a[0], Asym::Vertical(v) if v.abs() < 1e-9));
-        let d = Def::new("y = atan(x)").unwrap();
-        let a = asymptotes(&d, &[], &fr);
+        assert_eq!(a.len(), 2, "{a:?}");
+        let a = asy("y = ln(x)");
+        assert_eq!(a, vec![Asym::Vertical(0.0)]);
+        let a = asy("y = atan(x)");
         assert!(a.contains(&Asym::Line { k: 0.0, b: std::f64::consts::FRAC_PI_2 }), "{a:?}");
         assert!(a.contains(&Asym::Line { k: 0.0, b: -std::f64::consts::FRAC_PI_2 }), "{a:?}");
+        assert!(asy("y = x^2").is_empty());
+        assert!(asy("y = sqrt(x)").is_empty());
+        assert!(asy("y = sin(x)").is_empty());
+        assert_eq!(asy("y = e^x"), vec![Asym::Line { k: 0.0, b: 0.0 }]);
+    }
+
+    #[test]
+    fn asymptotes_of_other_curves() {
+        let fr = frame();
+        let h = Def::new("x^2/4 - y^2 = 1").unwrap();
+        let a = field_asymptotes(&h, &fr);
+        assert_eq!(a.len(), 2, "{a:?}");
+        assert!(a.contains(&Asym::Line { k: 0.5, b: 0.0 }) && a.contains(&Asym::Line { k: -0.5, b: 0.0 }), "{a:?}");
+        let fol = Def::new("x^3 + y^3 = 3x y").unwrap();
+        assert_eq!(field_asymptotes(&fol, &fr), vec![Asym::Line { k: -1.0, b: -1.0 }]);
+        assert!(field_asymptotes(&Def::new("x^2 + y^2 = 4").unwrap(), &fr).is_empty());
+        assert!(field_asymptotes(&Def::new("y^2 = x").unwrap(), &fr).is_empty());
+        // Hyperbolic spiral r = 1/θ approaches y = 1 as θ → 0⁺.
+        let sp = Def::new("r = 1/θ").unwrap();
+        let eval = |u: &[f64]| sp.path(u);
+        let s = sample(&eval, 0.0, 6.0, 1500, &fr);
+        let a = path_asymptotes(&sp, &s.events, 6.0);
+        assert!(a.contains(&Asym::Line { k: 0.0, b: 1.0 }), "{a:?}");
+        let p = Def::new("(t, 1/t)").unwrap();
+        let eval = |u: &[f64]| p.path(u);
+        let s = sample(&eval, -5.0, 5.0, 1500, &fr);
+        let a = path_asymptotes(&p, &s.events, 10.0);
+        assert!(a.contains(&Asym::Vertical(0.0)) && a.contains(&Asym::Line { k: 0.0, b: 0.0 }), "{a:?}");
+        let fy = Def::new("x = 1/(y - 2)").unwrap();
+        let eval = |u: &[f64]| fy.path(u);
+        let s = sample(&eval, fr.y0, fr.y1, 640, &fr);
+        let a = path_asymptotes(&fy, &s.events, fr.y1 - fr.y0);
+        assert!(a.contains(&Asym::Line { k: 0.0, b: 2.0 }) && a.contains(&Asym::Vertical(0.0)), "{a:?}");
+    }
+
+    #[test]
+    fn tangents_through_an_outside_point() {
+        let fr = frame();
+        // From (0, −1) to y = x²: touching at x = ±1.
+        let d = Def::new("y = x^2").unwrap();
+        let t = tangents_from(&d, [0.0, -1.0], -3.0, 3.0, &[], &fr);
+        assert_eq!(t.len(), 2, "{t:?}");
+        for tt in &t {
+            assert!((tt.p[0].abs() - 1.0).abs() < 1e-12 && (tt.p[1] - 1.0).abs() < 1e-12);
+        }
+        // From (2, 0) to the unit circle: touching at (1/2, ±√3/2).
+        use crate::curve2d::trace::{Grid, trace};
+        let c = Def::new("x^2 + y^2 = 1").unwrap();
+        let g = Grid { u0: -2.013, v0: -2.007, du: 0.02, dv: 0.02, nu: 200, nv: 200 };
+        let lines = trace(&|u: &[f64], v: &[f64]| c.field(u, v), &g);
+        let t = tangents_from(&c, [2.0, 0.0], 0.0, 0.0, &lines, &fr);
+        assert_eq!(t.len(), 2, "{t:?}");
+        for tt in &t {
+            assert!((tt.p[0] - 0.5).abs() < 1e-12 && (tt.p[1].abs() - 3f64.sqrt() / 2.0).abs() < 1e-12, "{tt:?}");
+        }
+        // The node of the folium is not a point of tangency.
+        let fol = Def::new("x^3 + y^3 = 3x y").unwrap();
+        let g = Grid { u0: -3.013, v0: -3.007, du: 0.025, dv: 0.025, nu: 240, nv: 240 };
+        let lines = trace(&|u: &[f64], v: &[f64]| fol.field(u, v), &g);
+        let t = tangents_from(&fol, [2.5, -2.0], 0.0, 0.0, &lines, &fr);
+        assert!(t.iter().all(|tt| tt.p[0].hypot(tt.p[1]) > 1e-3), "{t:?}");
+        assert!(!t.is_empty());
+        let lines = trace(&|u: &[f64], v: &[f64]| c.field(u, v), &Grid { u0: -2.013, v0: -2.007, du: 0.02, dv: 0.02, nu: 200, nv: 200 });
+        // Inside the circle: none.
+        assert!(tangents_from(&c, [0.2, 0.1], 0.0, 0.0, &lines, &fr).is_empty());
     }
 
     #[test]

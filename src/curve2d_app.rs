@@ -8,7 +8,7 @@ use std::time::Instant;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use crate::app::{kv, range_edit};
-use crate::curve2d::features::{self, ASYMPTOTES, Asym, EXTREMA, Features, INFLECTIONS, Kind, Line3, SINGULAR, ZEROS};
+use crate::curve2d::features::{self, ASYMPTOTES, Asym, EXTREMA, Features, INFLECTIONS, Kind, Line3, SINGULAR, Touch, ZEROS};
 use crate::curve2d::integral::{Integral, integrate};
 use crate::curve2d::nice;
 use crate::curve2d::region::{self, RegionDraw};
@@ -69,6 +69,10 @@ struct Scene {
     curves: Vec<(&'static str, u8, Option<(f64, f64)>)>,
     pi_ticks: bool,
     polar_grid: bool,
+    /// Show the asymptotes.
+    asym: bool,
+    /// A point off the curves with the tangents through it.
+    ext: Option<[f64; 2]>,
     view: Option<View>,
     /// Point on curve k at parameter u, with tangent and curvature circle.
     pick: Option<(usize, f64)>,
@@ -78,12 +82,13 @@ struct Scene {
 
 fn scenes() -> Vec<Scene> {
     use std::f64::consts::{PI, TAU};
-    let s = |en, zh, curves| Scene { en, zh, curves, pi_ticks: false, polar_grid: false, view: None, pick: None, integral: None };
+    let s = |en, zh, curves| Scene { en, zh, curves, pi_ticks: false, polar_grid: false, asym: false, ext: None, view: None, pick: None, integral: None };
     let all = ZEROS | EXTREMA | INFLECTIONS | ASYMPTOTES;
     vec![
         Scene { pi_ticks: true, ..s("sin x and cos x", "sin x 与 cos x", vec![("y = sin(x)", 0, None), ("y = cos(x)", 0, None)]) },
         Scene {
             view: Some(View { cx: 1.0, cy: 1.5, half: 8.0, aspect: 1.0 }),
+            asym: true,
             ..s("Sketching a graph: extrema, inflection, asymptotes", "函数作图：极值、拐点与渐近线", vec![("y = (x^2 + 1)/(x - 1)", all, None)])
         },
         s("Cubic: zeros, extrema, inflection point", "三次函数：零点、极值与拐点", vec![("y = x^3/3 - x", ZEROS | EXTREMA | INFLECTIONS, None)]),
@@ -92,7 +97,16 @@ fn scenes() -> Vec<Scene> {
             pick: Some((0, 1.0)),
             ..s("Tangent, normal and circle of curvature", "切线、法线与曲率圆", vec![("y = x^2/2", 0, None)])
         },
-        s("Folium of Descartes: tangents and a node", "笛卡尔叶形线：切线与奇点", vec![("x^3 + y^3 = 3x y", ZEROS | EXTREMA | SINGULAR, None), ("x + y = -1", 0, None)]),
+        Scene { asym: true, ..s("Folium of Descartes: tangents, a node, its asymptote", "笛卡尔叶形线：切线、奇点与渐近线", vec![("x^3 + y^3 = 3x y", ZEROS | EXTREMA | SINGULAR, None)]) },
+        Scene { asym: true, ..s("Hyperbola and its asymptotes", "双曲线及其渐近线", vec![("x^2/4 - y^2 = 1", ZEROS, None)]) },
+        Scene {
+            ext: Some([0.0, -1.0]),
+            ..s("Tangents from a point outside the curve", "过曲线外一点作切线", vec![("y = x^2", 0, None)])
+        },
+        Scene {
+            ext: Some([3.0, 1.0]),
+            ..s("Tangents from a point to a circle", "过圆外一点作圆的切线", vec![("x^2 + y^2 = 4", 0, None)])
+        },
         s("Circle and ellipse: intersections", "圆与椭圆的交点", vec![("x^2 + y^2 = 4", 0, None), ("x^2/9 + y^2 = 1", 0, None)]),
         Scene { polar_grid: true, ..s("Cardioid", "心形线", vec![("r = 1 + cos(θ)", ZEROS | EXTREMA, None)]) },
         Scene { polar_grid: true, ..s("Rose r = 2cos 3θ", "三叶玫瑰线", vec![("r = 2cos(3θ)", 0, Some((0.0, PI)))]) },
@@ -173,6 +187,7 @@ struct Cache {
     tex: Option<egui::TextureHandle>,
     version: u64,
     feats: Option<(u8, Features)>,
+    asym: Option<Vec<Asym>>,
 }
 
 pub struct CurveItem {
@@ -277,7 +292,7 @@ impl CurveItem {
             }
             Form::Region => region = Some(region::draw(def, &w, 2.0)),
         }
-        *c = Cache { key, window: Some(w), lines, events, region, tex: None, version: c.version + 1, feats: None };
+        *c = Cache { key, window: Some(w), lines, events, region, tex: None, version: c.version + 1, feats: None, asym: None };
     }
 
     /// Special points for the current drawing (computed when first asked).
@@ -289,13 +304,7 @@ impl CurveItem {
         }
         if self.cache.feats.as_ref().is_none_or(|f| f.0 != marks) {
             let fe = match def.form {
-                Form::FnX => {
-                    let mut fe = features::path_features(def, w.x0, w.x1, &w, marks);
-                    if marks & ASYMPTOTES != 0 {
-                        fe.asymptotes = features::asymptotes(def, &self.cache.events, &w);
-                    }
-                    fe
-                }
+                Form::FnX => features::path_features(def, w.x0, w.x1, &w, marks),
                 Form::FnY => features::path_features(def, w.y0, w.y1, &w, marks),
                 Form::Param | Form::Polar => features::path_features(def, self.range.0, self.range.1, &w, marks),
                 Form::Implicit => {
@@ -307,6 +316,41 @@ impl CurveItem {
             self.cache.feats = Some((marks, fe));
         }
         self.cache.feats.as_ref().map(|f| &f.1)
+    }
+
+    /// Asymptotes of the curve (computed when first asked).
+    fn asymptotes(&mut self) -> &[Asym] {
+        if self.cache.asym.is_none() {
+            let a = match (&self.def, self.cache.window) {
+                (Some(def), Some(w)) => match def.form {
+                    Form::FnX => features::path_asymptotes(def, &self.cache.events, w.x1 - w.x0),
+                    Form::FnY => features::path_asymptotes(def, &self.cache.events, w.y1 - w.y0),
+                    Form::Param | Form::Polar => features::path_asymptotes(def, &self.cache.events, self.range.1 - self.range.0),
+                    Form::Implicit => features::field_asymptotes(def, &w),
+                    _ => vec![],
+                },
+                _ => vec![],
+            };
+            // A straight line is not its own asymptote: drop lines that the
+            // drawn curve lies on everywhere.
+            let pts: Vec<[f64; 3]> = self.cache.lines.iter().flat_map(|l| l.iter().step_by((l.len() / 8).max(1)).copied()).collect();
+            let on = |a: &Asym, p: &[f64; 3]| match *a {
+                Asym::Vertical(x) => (p[0] - x).abs() <= 1e-9 * (1.0 + x.abs()),
+                Asym::Line { k, b } => (k * p[0] + b - p[1]).abs() <= 1e-9 * (1.0 + p[1].abs() + (k * p[0]).abs()),
+            };
+            let a = a.into_iter().filter(|a| pts.len() < 3 || !pts.iter().all(|p| on(a, p))).collect();
+            self.cache.asym = Some(a);
+        }
+        self.cache.asym.as_deref().unwrap_or(&[])
+    }
+
+    /// The parameter range searched for tangents through a point.
+    fn search_range(&self) -> (f64, f64) {
+        match (self.form(), self.cache.window) {
+            (Some(Form::FnX), Some(w)) => (w.x0, w.x1),
+            (Some(Form::FnY), Some(w)) => (w.y0, w.y1),
+            _ => self.range,
+        }
     }
 }
 
@@ -352,6 +396,15 @@ pub struct PlaneWorkspace {
     show_grid: bool,
     polar_grid: bool,
     pi_ticks: bool,
+    show_asym: bool,
+    /// Tangent at the curve point under the cursor.
+    hover_tangent: bool,
+    /// A point with the tangents through it, and whether a click places it.
+    ext: Option<[f64; 2]>,
+    ext_mode: bool,
+    dragging_ext: bool,
+    /// Tangents through `ext`: (key, list of (curve index, touch)).
+    ext_tangents: (String, Vec<(usize, Touch)>),
     show_marks: bool,
     show_inter: bool,
     show_labels: bool,
@@ -402,6 +455,16 @@ fn line_eq(p: [f64; 2], slope: f64) -> String {
         "0" => String::new(),
         "1" => "x".into(),
         "−1" => "−x".into(),
+        // A fraction: x/2, −3x/4, 3πx/4 (not 1/2x, which reads as 1/(2x)).
+        s if s.contains('/') => {
+            let (num, den) = s.rsplit_once('/').unwrap();
+            let num = match num {
+                "1" => "",
+                "−1" => "−",
+                n => n,
+            };
+            format!("{num}x/{den}")
+        }
         s => format!("{s}x"),
     };
     let bs = nice::short(b.abs());
@@ -409,6 +472,62 @@ fn line_eq(p: [f64; 2], slope: f64) -> String {
         (true, _) => format!("y = {}", nice::short(b)),
         (false, true) => format!("y = {kx}"),
         (false, false) => format!("y = {kx} {} {bs}", if b < 0.0 { "−" } else { "+" }),
+    }
+}
+
+/// A number as the parser reads it, exact when simple: `3pi/4`,
+/// `sqrt(2)/2`, `-5`, else ten decimals.
+fn src_num(v: f64) -> String {
+    if v.abs() < 1e-12 {
+        return "0".into();
+    }
+    let r = v.round();
+    if (v - r).abs() < 1e-9 * v.abs().max(1.0) {
+        return format!("{}", r as i64);
+    }
+    if let Some((_, f)) = nice::find(v, 1e-9 * v.abs().max(1.0)) {
+        let mut out = String::new();
+        let mut chars = f.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                'π' => out.push_str("pi"),
+                '−' => out.push('-'),
+                '√' => {
+                    out.push_str("sqrt(");
+                    while let Some(d) = chars.peek().copied().filter(|d| d.is_ascii_digit()) {
+                        out.push(d);
+                        chars.next();
+                    }
+                    out.push(')');
+                }
+                c => out.push(c),
+            }
+        }
+        return out;
+    }
+    let s = format!("{v:.10}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Source text of the line through p with direction d, for a new curve.
+fn line_src(p: [f64; 2], d: [f64; 2]) -> String {
+    if d[0].abs() <= 1e-12 * d[1].abs() {
+        return format!("x = {}", src_num(p[0]));
+    }
+    let k = d[1] / d[0];
+    let b = p[1] - k * p[0];
+    let kx = match src_num(k).as_str() {
+        "0" => String::new(),
+        "1" => "x".into(),
+        "-1" => "-x".into(),
+        s => format!("{s}*x"),
+    };
+    let bs = src_num(b);
+    match (kx.is_empty(), bs.as_str()) {
+        (true, _) => format!("y = {bs}"),
+        (false, "0") => format!("y = {kx}"),
+        (false, _) if bs.starts_with('-') => format!("y = {kx} - {}", &bs[1..]),
+        (false, _) => format!("y = {kx} + {bs}"),
     }
 }
 
@@ -501,6 +620,12 @@ impl PlaneWorkspace {
             show_grid: true,
             polar_grid: false,
             pi_ticks: false,
+            show_asym: false,
+            hover_tangent: false,
+            ext: None,
+            ext_mode: false,
+            dragging_ext: false,
+            ext_tangents: (String::new(), Vec::new()),
             show_marks: true,
             show_inter: true,
             show_labels: false,
@@ -596,6 +721,10 @@ impl PlaneWorkspace {
         self.set_curves(curves);
         self.pi_ticks = sc.pi_ticks;
         self.polar_grid = sc.polar_grid;
+        self.show_grid = !sc.polar_grid;
+        self.show_asym = sc.asym;
+        self.ext = sc.ext;
+        self.ext_mode = false;
         self.view = sc.view.unwrap_or(View::HOME);
         self.equal = (self.view.aspect - 1.0).abs() < 1e-12;
         if let Some((k, u)) = sc.pick
@@ -700,8 +829,8 @@ impl PlaneWorkspace {
                     let small = |s: &str, c: Color32| RichText::new(s).size(12.0).color(c);
                     ui.label(small(
                         tr(
-                            "Drag to pan · Scroll to zoom at the cursor · Double-click to reset · Click a curve to pick a point",
-                            "拖动平移 · 滚轮以光标为中心缩放 · 双击复位 · 单击曲线选取一点",
+                            "Drag to pan · Scroll to zoom at the cursor · Double-click to reset · Click a curve to pick a point · Shift-click: tangents through a point",
+                            "拖动平移 · 滚轮以光标为中心缩放 · 双击复位 · 单击曲线选点 · Shift+单击：过该点作切线",
                         ),
                         t.faint,
                     ));
@@ -783,7 +912,7 @@ impl PlaneWorkspace {
         let vis = self.view.frame(self.last_rect);
         for k in 0..self.curves.len() {
             let open = self.curves[k].uid >= self.fold_below;
-            let (gone, changed) = curve_card(ui, t, k, &mut self.curves[k], open, &vis, &mut pick_feature);
+            let (gone, changed) = curve_card(ui, t, k, &mut self.curves[k], open, &vis, self.show_asym, &mut pick_feature);
             if gone {
                 remove = Some(k);
             }
@@ -808,6 +937,7 @@ impl PlaneWorkspace {
             self.push_params();
         }
         self.pick_card(ui, t);
+        self.ext_card(ui, t);
         self.inter_card(ui, t);
         self.integral_card(ui, t);
         self.view_card(ui, t);
@@ -823,6 +953,7 @@ impl PlaneWorkspace {
         let mut clear = false;
         let mut u = pick.u;
         let (mut tan, mut nor, mut circ) = (self.show_tangent, self.show_normal, self.show_circle);
+        let mut add_line: Option<String> = None;
         let c = &self.curves[k];
         let form = c.form();
         card(
@@ -880,17 +1011,141 @@ impl PlaneWorkspace {
                         ui.toggle_value(&mut nor, tr("Normal", "法线"));
                         ui.toggle_value(&mut circ, tr("Circle of curvature", "曲率圆"));
                     });
+                    ui.horizontal_wrapped(|ui| {
+                        let full = self.curves.len() >= MAX_CURVES;
+                        let tip = if full { tr("The list is full (6 curves)", "曲线已满（6 条）") } else { tr("Keep this line as a curve of its own", "把这条直线作为一条曲线保留下来") };
+                        if ui.add_enabled(!full, egui::Button::new(format!("+ {}", tr("Keep tangent", "保留切线")))).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                            add_line = Some(line_src(info.p, info.t));
+                        }
+                        if ui.add_enabled(!full, egui::Button::new(format!("+ {}", tr("Keep normal", "保留法线")))).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                            add_line = Some(line_src(info.p, [-info.t[1], info.t[0]]));
+                        }
+                    });
                 }
                 caption(ui, tr("Drag the point along the curve, or click another curve.", "可以沿曲线拖动这个点，或单击另一条曲线。"));
             },
         );
         (self.show_tangent, self.show_normal, self.show_circle) = (tan, nor, circ);
+        if let Some(src) = add_line {
+            self.add_curve(&src);
+        }
         if clear {
             self.pick = None;
         } else if let Some(p) = &mut self.pick
             && u != pick.u
         {
             p.u = u;
+        }
+    }
+
+    /// Add a curve (a tangent or normal line); false when the list is full.
+    fn add_curve(&mut self, src: &str) -> bool {
+        if self.curves.len() >= MAX_CURVES {
+            return false;
+        }
+        let used: Vec<usize> = self.curves.iter().map(|c| c.color).collect();
+        let color = (0..COLORS.len()).find(|c| !used.contains(c)).unwrap_or(0);
+        let mut c = CurveItem::new(src, color);
+        c.uid = self.next_uid;
+        self.next_uid += 1;
+        self.curves.push(c);
+        self.sync_params();
+        true
+    }
+
+    fn update_ext_tangents(&mut self) {
+        let Some(q) = self.ext else {
+            self.ext_tangents = (String::new(), Vec::new());
+            return;
+        };
+        let mut key = format!("{q:?}");
+        for c in &self.curves {
+            key += &format!("|{}:{}:{}:{:?}", c.uid, c.visible, c.cache.version, c.range);
+        }
+        if key == self.ext_tangents.0 {
+            return;
+        }
+        let mut out = Vec::new();
+        for (k, c) in self.curves.iter().enumerate() {
+            if !c.visible || !c.is_curve() {
+                continue;
+            }
+            let (Some(d), Some(w)) = (&c.def, c.cache.window) else { continue };
+            let (u0, u1) = c.search_range();
+            let lines: Vec<Vec<[f64; 2]>> = if d.form == Form::Implicit { c.cache.lines.iter().map(|l| l.iter().map(|p| [p[0], p[1]]).collect()).collect() } else { Vec::new() };
+            for tc in features::tangents_from(d, q, u0, u1, &lines, &w) {
+                out.push((k, tc));
+            }
+        }
+        self.ext_tangents = (key, out);
+    }
+
+    fn ext_card(&mut self, ui: &mut Ui, t: &Tokens) {
+        let Some(mut q) = self.ext else { return };
+        let mut clear = false;
+        let mut add: Option<String> = None;
+        let full = self.curves.len() >= MAX_CURVES;
+        let list = self.ext_tangents.1.clone();
+        let curves = &self.curves;
+        card(
+            ui,
+            "p_ext",
+            icon::CROSSHAIRS,
+            tr("Tangents through a point", "过点作切线"),
+            true,
+            |ui| {
+                if ui.add(egui::Button::new(RichText::new("✕").size(13.0).color(t.muted)).frame(false)).on_hover_text(tr("Remove the point", "去掉这个点")).clicked() {
+                    clear = true;
+                }
+            },
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Q = (").monospace().color(t.text));
+                    let speed = (self.view.half * 0.002).max(1e-4);
+                    ui.add(egui::DragValue::new(&mut q[0]).speed(speed).max_decimals(4));
+                    ui.label(RichText::new(",").monospace().color(t.text));
+                    ui.add(egui::DragValue::new(&mut q[1]).speed(speed).max_decimals(4));
+                    ui.label(RichText::new(")").monospace().color(t.text));
+                });
+                if list.is_empty() {
+                    caption(ui, tr(
+                        "No tangent passes through this point near the view (for example, the point is inside a closed curve).",
+                        "视图附近没有经过这个点的切线（例如点在封闭曲线内部）。",
+                    ));
+                }
+                for (k, tc) in list.iter().take(12) {
+                    let c = &curves[*k];
+                    let slope = tc.dir[1] / tc.dir[0];
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 4.0, c32(COLORS[c.color]));
+                        ui.label(RichText::new(CIRCLED[(*k).min(5)]).size(12.5).color(t.muted));
+                        ui.label(RichText::new(tr("touches at", "切点")).size(12.5).color(t.muted));
+                        ui.label(RichText::new(format!("({}, {})", nice::short(tc.p[0]), nice::short(tc.p[1]))).monospace().size(13.0).color(t.text));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        ui.label(RichText::new(line_eq(tc.p, slope)).monospace().size(13.0).color(t.text));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add_enabled(!full, egui::Button::new("+").small()).on_hover_text(tr("Add this line to the curves", "把这条切线加入曲线列表")).clicked() {
+                                add = Some(line_src(tc.p, tc.dir));
+                            }
+                        });
+                    });
+                }
+                if list.len() > 12 {
+                    caption(ui, &if i18n::zh() { format!("……还有 {} 条", list.len() - 12) } else { format!("… and {} more", list.len() - 12) });
+                }
+                caption(ui, tr("Shift-click the view to move Q, or drag it.", "按住 Shift 单击画布可移动 Q，也可以直接拖动它。"));
+            },
+        );
+        if clear {
+            self.ext = None;
+        } else {
+            self.ext = Some(q);
+        }
+        if let Some(src) = add {
+            self.add_curve(&src);
         }
     }
 
@@ -1238,16 +1493,26 @@ impl PlaneWorkspace {
         if resp.drag_started_by(egui::PointerButton::Primary) {
             // Where the button went down (the drag starts a few points later).
             let start = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
-            self.dragging_pick = match (start, self.pick_info()) {
-                (Some(s), Some(info)) => to_screen(rect, &fr0, info.p[0], info.p[1]).distance(s) < 12.0,
+            self.dragging_ext = match (start, self.ext) {
+                (Some(s), Some(q)) => to_screen(rect, &fr0, q[0], q[1]).distance(s) < 12.0,
                 _ => false,
             };
+            self.dragging_pick = !self.dragging_ext
+                && match (start, self.pick_info()) {
+                    (Some(s), Some(info)) => to_screen(rect, &fr0, info.p[0], info.p[1]).distance(s) < 12.0,
+                    _ => false,
+                };
         }
         if resp.drag_stopped() {
             self.dragging_pick = false;
+            self.dragging_ext = false;
         }
         if resp.dragged() {
-            if self.dragging_pick && resp.dragged_by(egui::PointerButton::Primary) {
+            if self.dragging_ext && resp.dragged_by(egui::PointerButton::Primary) {
+                if let Some(at) = resp.interact_pointer_pos() {
+                    self.ext = Some(from_screen(rect, &fr0, at));
+                }
+            } else if self.dragging_pick && resp.dragged_by(egui::PointerButton::Primary) {
                 if let (Some(at), Some(pick)) = (resp.interact_pointer_pos(), self.pick)
                     && let Some((_, p, u, _)) = self.nearest(rect, &fr0, at, Some(pick.uid))
                 {
@@ -1284,19 +1549,27 @@ impl PlaneWorkspace {
                 c.update(&fr, &pkey);
             }
         }
-        if self.show_marks {
-            for c in &mut self.curves {
-                if c.visible {
+        for c in &mut self.curves {
+            if c.visible {
+                if self.show_marks {
                     c.features();
+                }
+                if self.show_asym {
+                    c.asymptotes();
                 }
             }
         }
         self.settle_pick();
+        self.update_ext_tangents();
         self.update_intersections(&fr);
+        let shift = ui.input(|i| i.modifiers.shift);
         if resp.clicked()
             && let Some(at) = resp.interact_pointer_pos()
         {
-            if let Some((uid, p, u)) = self.marker_at(rect, &fr, at) {
+            if shift || self.ext_mode {
+                self.ext = Some(from_screen(rect, &fr, at));
+                self.update_ext_tangents();
+            } else if let Some((uid, p, u)) = self.marker_at(rect, &fr, at) {
                 self.pick = Some(Pick { uid, u, x: p[0], y: p[1] });
             } else if let Some((k, p, u, dist)) = self.nearest(rect, &fr, at, None)
                 && dist < 9.0
@@ -1342,11 +1615,11 @@ impl PlaneWorkspace {
         self.draw_integral(&p, rect, &fr, t);
         self.draw_axes(&p, rect, &fr, t, bg);
         // Asymptotes.
-        if self.show_marks {
+        if self.show_asym {
             for c in &self.curves {
-                let Some((_, fe)) = c.cache.feats.as_ref().filter(|_| c.visible) else { continue };
+                let Some(list) = c.cache.asym.as_ref().filter(|_| c.visible) else { continue };
                 let col = c32(COLORS[c.color]).gamma_multiply(0.75);
-                for a in &fe.asymptotes {
+                for a in list {
                     let pts = match *a {
                         Asym::Vertical(x) => [[fr.sx(x), -10.0], [fr.sx(x), fr.size()[1] + 10.0]],
                         Asym::Line { k, b } => {
@@ -1390,6 +1663,7 @@ impl PlaneWorkspace {
             }
         }
         self.draw_pick(&p, rect, &fr, t);
+        self.draw_ext(&p, rect, &fr, t, bg);
         let hover = resp.hover_pos().filter(|_| !resp.dragged());
         let tip = self.draw_markers(&p, rect, &fr, t, bg, hover);
         // Hover: the nearest curve point, else nothing.
@@ -1408,6 +1682,32 @@ impl PlaneWorkspace {
                     && u.is_finite()
                 {
                     text += &format!("\n{} = {}", d.var, nice::short(u));
+                }
+                if self.hover_tangent
+                    && let Some(d) = &c.def
+                {
+                    let dir = if d.form.is_path() {
+                        let pp = d.path_at(u);
+                        [pp[2], pp[3]]
+                    } else if d.form == Form::Implicit {
+                        let [_, fx, fy] = d.field_grad(&[q[0]], &[q[1]]);
+                        [fy[0], -fx[0]]
+                    } else {
+                        [f64::NAN; 2]
+                    };
+                    let l = dir[0].hypot(dir[1]);
+                    if l > 0.0 && l.is_finite() {
+                        let dir = [dir[0] / l, dir[1] / l];
+                        let big = 4.0 * (fr.x1 - fr.x0 + fr.y1 - fr.y0);
+                        let sc = |x: f64, y: f64| [rect.left() as f64 + fr.sx(x), rect.top() as f64 + fr.sy(y)];
+                        let ends = [sc(q[0] - dir[0] * big, q[1] - dir[1] * big), sc(q[0] + dir[0] * big, q[1] + dir[1] * big)];
+                        let ink = if t.dark { Color32::from_white_alpha(150) } else { Color32::from_black_alpha(140) };
+                        for run in clip_runs(&ends, clip) {
+                            p.add(Shape::line(run, Stroke::new(1.3, ink)));
+                        }
+                        let k = dir[1] / dir[0];
+                        text += &format!("\n{} {}", tr("slope", "斜率"), if k.is_finite() && k.abs() < 1e12 { nice::short(k) } else { "∞".into() });
+                    }
                 }
                 tooltip(&p, s, &text, t, clip);
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1457,7 +1757,7 @@ impl PlaneWorkspace {
     }
 
     fn draw_grid(&self, p: &egui::Painter, rect: Rect, f: &Frame2, t: &Tokens) {
-        if !self.show_grid {
+        if !self.show_grid && !self.polar_grid {
             return;
         }
         let minor = if t.dark { Color32::from_white_alpha(9) } else { Color32::from_black_alpha(9) };
@@ -1465,7 +1765,7 @@ impl PlaneWorkspace {
         let tx = ticks(f.x0, f.x1, ((rect.width() / 90.0) as usize).max(3));
         let ty = ticks(f.y0, f.y1, ((rect.height() / 70.0) as usize).max(3));
         if self.polar_grid {
-            // Circles at the x tick step, rays every 15° (labels every 30°).
+            // Circles at the x tick step; rays every 30° from the first circle out.
             let step = if tx.len() > 1 { tx[1] - tx[0] } else { 1.0 };
             let corners = [(f.x0, f.y0), (f.x0, f.y1), (f.x1, f.y0), (f.x1, f.y1)];
             let rmax = corners.iter().map(|(x, y)| x.hypot(*y)).fold(0.0, f64::max);
@@ -1485,10 +1785,12 @@ impl PlaneWorkspace {
                     p.add(Shape::line(pts, Stroke::new(1.0, major)));
                 }
             }
-            for i in 0..24 {
-                let a = std::f64::consts::TAU * i as f64 / 24.0;
+            let _ = minor;
+            for i in 0..12 {
+                let a = std::f64::consts::TAU * i as f64 / 12.0;
+                let start = to_screen(rect, f, step * a.cos(), step * a.sin());
                 let end = to_screen(rect, f, 2.0 * rmax * a.cos(), 2.0 * rmax * a.sin());
-                p.line_segment([o, end], Stroke::new(1.0, if i % 2 == 0 { major } else { minor }));
+                p.line_segment([start, end], Stroke::new(1.0, major));
             }
             if inside {
                 let lr = (rect.width().min(rect.height()) * 0.42) as f64;
@@ -1615,8 +1917,13 @@ impl PlaneWorkspace {
                         tip = Some(format!("{}\nx = {}\ny = {}", q.kind.name(), nice::show(q.x), nice::show(q.y)));
                     }
                 }
-                if hover.is_some() && tip.is_none() {
-                    for a in &fe.asymptotes {
+            }
+        }
+        if self.show_asym && hover.is_some() && tip.is_none() {
+            for c in &self.curves {
+                let Some(list) = c.cache.asym.as_ref().filter(|_| c.visible) else { continue };
+                {
+                    for a in list {
                         let h = hover.unwrap();
                         let d = match *a {
                             Asym::Vertical(x) => (to_screen(rect, f, x, 0.0).x - h.x).abs(),
@@ -1705,6 +2012,30 @@ impl PlaneWorkspace {
         // Label beside the point, on the left near the right edge.
         let (at, align) = if s.x + 150.0 > rect.right() { (s + vec2(-10.0, 8.0), Align2::RIGHT_TOP) } else { (s + vec2(10.0, 8.0), Align2::LEFT_TOP) };
         pill(p, at, align, format!("({}, {})", nice::short(info.p[0]), nice::short(info.p[1])), t.text, t.overlay);
+    }
+
+    fn draw_ext(&self, p: &egui::Painter, rect: Rect, f: &Frame2, t: &Tokens, bg: Color32) {
+        let Some(q) = self.ext else { return };
+        let sc = |x: f64, y: f64| [rect.left() as f64 + f.sx(x), rect.top() as f64 + f.sy(y)];
+        let big = 4.0 * (f.x1 - f.x0 + f.y1 - f.y0);
+        for (k, tc) in &self.ext_tangents.1 {
+            let col = c32(COLORS[self.curves.get(*k).map_or(0, |c| c.color)]);
+            let (a, d) = (tc.p, tc.dir);
+            let ends = [sc(a[0] - d[0] * big, a[1] - d[1] * big), sc(a[0] + d[0] * big, a[1] + d[1] * big)];
+            for run in clip_runs(&ends, rect) {
+                p.add(Shape::line(run, Stroke::new(1.5, col.gamma_multiply(0.8))));
+            }
+            let s = to_screen(rect, f, a[0], a[1]);
+            p.circle(s, 4.5, bg, Stroke::new(2.0, col));
+            if self.show_labels {
+                pill(p, s + vec2(7.0, -6.0), Align2::LEFT_BOTTOM, format!("({}, {})", nice::short(a[0]), nice::short(a[1])), t.text, bg.gamma_multiply(0.8));
+            }
+        }
+        let s = to_screen(rect, f, q[0], q[1]);
+        let ink = if t.dark { Color32::from_rgb(0xe6, 0xe9, 0xf0) } else { Color32::from_rgb(0x30, 0x34, 0x40) };
+        let r = 6.0;
+        p.add(Shape::convex_polygon(vec![s + vec2(0.0, -r), s + vec2(r, 0.0), s + vec2(0.0, r), s + vec2(-r, 0.0)], ink, Stroke::new(1.5, bg)));
+        p.text(s + vec2(9.0, -9.0), Align2::LEFT_BOTTOM, "Q", FontId::proportional(14.0), ink);
     }
 
     fn draw_integral(&self, p: &egui::Painter, rect: Rect, f: &Frame2, _t: &Tokens) {
@@ -1813,6 +2144,13 @@ impl PlaneWorkspace {
                 if ui.button(with_icon(icon::TARGET, tr("Fit", "适应"))).on_hover_text(tr("Fit the view to the curves", "调整视图以显示全部曲线")).clicked() {
                     fit = true;
                 }
+                if ui
+                    .selectable_label(self.ext_mode, with_icon(icon::CROSSHAIRS, tr("Tangent from a point", "过点作切线")))
+                    .on_hover_text(tr("While on, a click places the point Q and draws the tangents through it (Shift-click works any time)", "打开后，单击画布放置点 Q，画出过 Q 的切线（随时也可以按住 Shift 单击）"))
+                    .clicked()
+                {
+                    self.ext_mode = !self.ext_mode;
+                }
             });
         });
         if fit {
@@ -1836,16 +2174,27 @@ impl PlaneWorkspace {
                 }
             });
         }
+        let (mut grid, mut polar) = (self.show_grid, self.polar_grid);
         let chips: Vec<(&mut bool, &str, &str, Option<Color32>, &str)> = vec![
-            (&mut self.show_marks, tr("Special points", "特征点"), tr("Points", "特征点"), None, tr("Zeros, extrema, asymptotes … chosen in each curve's card", "零点、极值、渐近线等（在各曲线卡片中选择）")),
+            (&mut self.show_marks, tr("Special points", "特征点"), tr("Points", "特征点"), None, tr("Zeros, extrema … chosen in each curve's card", "零点、极值等（在各曲线卡片中选择）")),
             (&mut self.show_inter, tr("Intersections", "交点"), tr("Crossings", "交点"), None, tr("Where the curves cross", "曲线之间的交点")),
             (&mut self.show_labels, tr("Coordinates", "坐标标签"), tr("Labels", "标签"), None, tr("Write the coordinates next to the points", "在点旁边标出坐标")),
-            (&mut self.show_grid, tr("Grid", "网格"), tr("Grid", "网格"), None, tr("Background grid", "背景网格")),
-            (&mut self.polar_grid, tr("Polar grid", "极坐标网格"), tr("Polar", "极坐标"), None, tr("Circles and rays around the origin", "以原点为中心的圆与射线")),
+            (&mut self.show_asym, tr("Asymptotes", "渐近线"), tr("Asym.", "渐近线"), None, tr("Vertical, horizontal and oblique asymptotes of all curves", "所有曲线的竖直、水平与斜渐近线")),
+            (&mut self.hover_tangent, tr("Tangent at cursor", "跟随切线"), tr("Follow", "跟随"), None, tr("Show the tangent where the cursor is on a curve", "鼠标移到曲线上时显示该点的切线")),
+            (&mut grid, tr("Grid", "直角网格"), tr("Grid", "网格"), None, tr("Rectangular grid", "直角坐标网格")),
+            (&mut polar, tr("Polar grid", "极坐标网格"), tr("Polar", "极坐标"), None, tr("Circles and rays around the origin (instead of the rectangular grid)", "以原点为中心的圆与射线（代替直角网格）")),
             (&mut self.pi_ticks, tr("π ticks", "π 刻度"), "π", None, tr("x-axis ticks in multiples of π", "x 轴刻度用 π 的倍数")),
             (&mut self.show_legend, tr("Legend", "图例"), tr("Legend", "图例"), None, tr("List of the curves", "曲线列表")),
         ];
         layer_bar(ui, inner, &mut self.layers_open, chips);
+        // One grid at a time.
+        if polar && !self.polar_grid {
+            (self.polar_grid, self.show_grid) = (true, false);
+        } else if grid && !self.show_grid {
+            (self.show_grid, self.polar_grid) = (true, false);
+        } else {
+            (self.show_grid, self.polar_grid) = (grid, polar);
+        }
     }
 
     /// Fit the view around the visible curves.
@@ -1926,7 +2275,8 @@ fn d_polar_r(d: Option<&Def>, u: f64) -> f64 {
 }
 
 /// One curve's card. Returns (removed, parameters may have changed).
-fn curve_card(ui: &mut Ui, t: &Tokens, k: usize, c: &mut CurveItem, default_open: bool, vis: &Frame2, pick: &mut Option<(u32, Kind, [f64; 2], f64)>) -> (bool, bool) {
+#[allow(clippy::too_many_arguments)]
+fn curve_card(ui: &mut Ui, t: &Tokens, k: usize, c: &mut CurveItem, default_open: bool, vis: &Frame2, show_asym: bool, pick: &mut Option<(u32, Kind, [f64; 2], f64)>) -> (bool, bool) {
     let mut visible = c.visible;
     let mut remove = false;
     let mut changed = false;
@@ -2010,7 +2360,6 @@ fn curve_card(ui: &mut Ui, t: &Tokens, k: usize, c: &mut CurveItem, default_open
                     (ZEROS, tr("Zeros", "零点"), tr("Zeros and the y-intercept", "零点与 y 轴截距")),
                     (EXTREMA, tr("Extrema", "极值"), tr("Local maxima and minima", "极大值与极小值")),
                     (INFLECTIONS, tr("Inflection", "拐点"), tr("Where the concavity changes", "凹凸性改变的点")),
-                    (ASYMPTOTES, tr("Asymptotes", "渐近线"), tr("Vertical, horizontal and oblique asymptotes", "竖直、水平与斜渐近线")),
                 ],
                 Form::FnY | Form::Param | Form::Polar => vec![
                     (ZEROS, tr("Axis crossings", "与坐标轴交点"), ""),
@@ -2068,15 +2417,18 @@ fn curve_card(ui: &mut Ui, t: &Tokens, k: usize, c: &mut CurveItem, default_open
                 if in_view.len() > 10 {
                     caption(ui, &if i18n::zh() { format!("……视图内还有 {} 个", in_view.len() - 10) } else { format!("… {} more in the view", in_view.len() - 10) });
                 }
-                for a in fe.asymptotes.iter().filter(|a| !matches!(a, Asym::Vertical(x) if *x < vis.x0 || *x > vis.x1)) {
-                    let eq = match *a {
+                if fe.truncated {
+                    caption(ui, tr("Too many points: only some are shown.", "点太多，只显示了一部分。"));
+                }
+            }
+            if show_asym {
+                let list: Vec<Asym> = c.cache.asym.as_deref().unwrap_or(&[]).iter().copied().filter(|a| !matches!(a, Asym::Vertical(x) if *x < vis.x0 || *x > vis.x1)).collect();
+                for a in list {
+                    let eq = match a {
                         Asym::Vertical(x) => format!("x = {}", nice::short(x)),
                         Asym::Line { k, b } => line_eq([0.0, b], k),
                     };
                     kv(ui, t, tr("Asymptote", "渐近线"), "", &eq);
-                }
-                if fe.truncated {
-                    caption(ui, tr("Too many points: only some are shown.", "点太多，只显示了一部分。"));
                 }
             }
             appearance(ui, t, c);
@@ -2130,6 +2482,29 @@ mod tests {
         assert_eq!(line_eq([2.0, 5.0], f64::INFINITY), "x = 2");
         assert_eq!(line_eq([0.0, 3.0], 0.0), "y = 3");
         assert_eq!(line_eq([1.0, 0.5], -1.0), "y = −x + 3/2");
+        assert_eq!(line_eq([0.0, 0.0], 0.5), "y = x/2");
+        assert_eq!(line_eq([0.0, 1.0], -0.75), "y = −3x/4 + 1");
+    }
+
+    #[test]
+    fn kept_lines_parse_back() {
+        let pi = std::f64::consts::PI;
+        for (p, d) in [([1.0, 1.0], [1.0, 2.0]), ([0.5, 3f64.sqrt() / 2.0], [-3f64.sqrt() / 2.0, 0.5]), ([2.0, 5.0], [0.0, 1.0]), ([pi / 2.0, 1.0], [1.0, 0.0]), ([0.3, 0.7], [0.6, -0.8])] {
+            let src = line_src(p, d);
+            let def = Def::new(&src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            let k = d[1] / d[0];
+            match def.form {
+                Form::FnX => {
+                    let y = def.path(&[p[0], p[0] + 1.0])[1].clone();
+                    assert!((y[0] - p[1]).abs() < 1e-9 && (y[1] - y[0] - k).abs() < 1e-9, "{src}");
+                }
+                Form::FnY => assert!(d[0] == 0.0 && (def.path(&[0.0])[0][0] - p[0]).abs() < 1e-12, "{src}"),
+                f => panic!("{src}: {f:?}"),
+            }
+        }
+        assert_eq!(line_src([1.0, 1.0], [1.0, 2.0]), "y = 2*x - 1");
+        assert_eq!(src_num(-3.0 * pi / 4.0), "-3pi/4");
+        assert_eq!(src_num(3f64.sqrt() / 3.0), "sqrt(3)/3");
     }
 
     #[test]
@@ -2164,8 +2539,8 @@ mod tests {
         }
         // tan x meets y = x²/4 − 1 more than twice in the window.
         assert!(w.inter.1.len() >= 4, "{}", w.inter.1.len());
-        let fe = w.curves[0].features().unwrap();
-        assert!(fe.asymptotes.len() >= 4, "{:?}", fe.asymptotes);
+        let a = w.curves[0].asymptotes();
+        assert!(a.len() >= 4, "{a:?}");
     }
 
     #[test]

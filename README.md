@@ -8,7 +8,7 @@
 
 ## 功能
 
-- **平面曲线**：按写法自动识别 y = f(x)、x = g(y)、隐函数 F(x, y) = 0、极坐标 r = f(θ)（及 r² = 4cos 2θ 这类极坐标方程）、参数方程 (x(t), y(t))，以及用不等式表示的区域（严格不等式边界画虚线）；标出零点、极值点、拐点、渐近线、水平 / 竖直切线点、尖点和奇点，常见值写成 π/2、√2/2 这类精确形式；曲线之间的交点；单击曲线选点，显示切线、法线和曲率圆；定积分、两曲线间面积、极坐标面积、弧长。
+- **平面曲线**：按写法自动识别 y = f(x)、x = g(y)、隐函数 F(x, y) = 0、极坐标 r = f(θ)（及 r² = 4cos 2θ 这类极坐标方程）、参数方程 (x(t), y(t))，以及用不等式表示的区域（严格不等式边界画虚线）；标出零点、极值点、拐点、渐近线、水平 / 竖直切线点、尖点和奇点，常见值写成 π/2、√2/2 这类精确形式；渐近线（函数、隐函数、参数方程和极坐标曲线都能识别）；曲线之间的交点；单击曲线选点，显示切线、法线和曲率圆，切线可保留为新曲线；过曲线外一点作切线；直角或极坐标网格；定积分、两曲线间面积、极坐标面积、弧长。
 - **多元微积分**：输入 z = f(x, y)（普通表达式或 LaTeX），画曲面和等高线图；P 点处的偏导数、梯度、方向导数、二阶泰勒模型；临界点及其分类；任意区域上的二重积分，并可显示黎曼和柱体、累次积分截面。
 - **空间几何**：隐式曲面 F(x, y, z) = 0（二次曲面自动识别并给出标准方程）、直线 / 曲线、球、柱、锥、长方体；求交线、交点、切点，投影到坐标平面，用 x / y / z = c 截面查看截面实形。
 - **复变函数**：定义域着色、|f| 起伏曲面、映射网格；解析性检验、零点与极点、留数、围道积分。
@@ -73,7 +73,7 @@ Linux 上编译需要 `libxkbcommon` 和 `wayland` 的开发文件（Arch 已自
 
 **Workspaces**
 
-- **Plane curves** — recognised from how they are written: y = f(x), x = g(y), implicit F(x, y) = 0, polar r = f(θ) (or any equation in r and θ), parametric (x(t), y(t)), and regions given by inequalities (strict ones with dashed edges); zeros, extrema, inflection points, asymptotes, horizontal / vertical tangents, cusps and singular points, with exact forms such as π/2 or √2/2 where they apply; intersections; a point on a curve with tangent, normal and circle of curvature; definite integrals, areas between curves, polar areas and arc lengths.
+- **Plane curves** — recognised from how they are written: y = f(x), x = g(y), implicit F(x, y) = 0, polar r = f(θ) (or any equation in r and θ), parametric (x(t), y(t)), and regions given by inequalities (strict ones with dashed edges); zeros, extrema, inflection points, asymptotes, horizontal / vertical tangents, cusps and singular points, with exact forms such as π/2 or √2/2 where they apply; asymptotes of graphs, implicit, parametric and polar curves; intersections; a point on a curve with tangent, normal and circle of curvature (lines can be kept as curves); tangents through a point off the curve; rectangular or polar grid; definite integrals, areas between curves, polar areas and arc lengths.
 - **Multivariable calculus** — surfaces and contour maps of z = f(x, y) (plain or LaTeX input); partial derivatives, gradient, directional derivative and second-order Taylor model at a point; critical points with classification; double integrals over regions with Riemann columns and iterated-integral slices.
 - **Space geometry** — implicit surfaces F(x, y, z) = 0 (quadrics classified, with standard form), lines and curves, simple solids; intersection curves, points and tangencies; projections onto the coordinate planes; section planes with true-shape views.
 - **Complex functions** — domain colouring, |f| relief, mapping grids; holomorphy check, zeros and poles, residues, contour integrals.
