@@ -1,13 +1,14 @@
 # Math-crystal
 
-可视化数学工作台：多元微积分、空间几何、复变函数、傅里叶频谱。Rust + egui + wgpu 编写，单个可执行文件，界面支持中文 / English。
+可视化数学工作台：平面曲线、多元微积分、空间几何、复变函数、傅里叶频谱。Rust + egui + wgpu 编写，单个可执行文件，界面支持中文 / English。
 
-*A visual math workbench for multivariable calculus, space geometry, complex functions and Fourier spectra. Written in Rust (egui + wgpu); one self-contained executable; Chinese / English interface. [English below](#english).*
+*A visual math workbench for plane curves, multivariable calculus, space geometry, complex functions and Fourier spectra. Written in Rust (egui + wgpu); one self-contained executable; Chinese / English interface. [English below](#english).*
 
 ![多元微积分](docs/calculus.png)
 
 ## 功能
 
+- **平面曲线**：按写法自动识别 y = f(x)、x = g(y)、隐函数 F(x, y) = 0、极坐标 r = f(θ)（及 r² = 4cos 2θ 这类极坐标方程）、参数方程 (x(t), y(t))，以及用不等式表示的区域（严格不等式边界画虚线）；标出零点、极值点、拐点、渐近线、水平 / 竖直切线点、尖点和奇点，常见值写成 π/2、√2/2 这类精确形式；曲线之间的交点；单击曲线选点，显示切线、法线和曲率圆；定积分、两曲线间面积、极坐标面积、弧长。
 - **多元微积分**：输入 z = f(x, y)（普通表达式或 LaTeX），画曲面和等高线图；P 点处的偏导数、梯度、方向导数、二阶泰勒模型；临界点及其分类；任意区域上的二重积分，并可显示黎曼和柱体、累次积分截面。
 - **空间几何**：隐式曲面 F(x, y, z) = 0（二次曲面自动识别并给出标准方程）、直线 / 曲线、球、柱、锥、长方体；求交线、交点、切点，投影到坐标平面，用 x / y / z = c 截面查看截面实形。
 - **复变函数**：定义域着色、|f| 起伏曲面、映射网格；解析性检验、零点与极点、留数、围道积分。
@@ -16,9 +17,13 @@
 - 未知的单个字母自动变成参数滑块，可播放动画；视图可导出 PNG（保存在「图片/Math-crystal」）。
 - 关闭后再打开，各工作区的公式、参数值、范围和空间几何里的对象都会恢复，并回到上次所在的工作区。
 
-| 空间几何 | 复变函数 | 频谱 |
-|---|---|---|
-| ![空间几何](docs/space.png) | ![复变函数](docs/complex.png) | ![频谱](docs/spectrum.png) |
+| 平面曲线 | 空间几何 |
+|---|---|
+| ![平面曲线](docs/plane.png) | ![空间几何](docs/space.png) |
+
+| 复变函数 | 频谱 |
+|---|---|
+| ![复变函数](docs/complex.png) | ![频谱](docs/spectrum.png) |
 
 ## 安装
 
@@ -68,6 +73,7 @@ Linux 上编译需要 `libxkbcommon` 和 `wayland` 的开发文件（Arch 已自
 
 **Workspaces**
 
+- **Plane curves** — recognised from how they are written: y = f(x), x = g(y), implicit F(x, y) = 0, polar r = f(θ) (or any equation in r and θ), parametric (x(t), y(t)), and regions given by inequalities (strict ones with dashed edges); zeros, extrema, inflection points, asymptotes, horizontal / vertical tangents, cusps and singular points, with exact forms such as π/2 or √2/2 where they apply; intersections; a point on a curve with tangent, normal and circle of curvature; definite integrals, areas between curves, polar areas and arc lengths.
 - **Multivariable calculus** — surfaces and contour maps of z = f(x, y) (plain or LaTeX input); partial derivatives, gradient, directional derivative and second-order Taylor model at a point; critical points with classification; double integrals over regions with Riemann columns and iterated-integral slices.
 - **Space geometry** — implicit surfaces F(x, y, z) = 0 (quadrics classified, with standard form), lines and curves, simple solids; intersection curves, points and tangencies; projections onto the coordinate planes; section planes with true-shape views.
 - **Complex functions** — domain colouring, |f| relief, mapping grids; holomorphy check, zeros and poles, residues, contour integrals.

@@ -20,6 +20,8 @@ pub mod space_inter;
 pub mod session;
 pub mod outline;
 pub mod graph_mesh;
+pub mod curve2d;
+pub mod curve2d_app;
 
 /// Frames the main window has drawn so far; lets the Windows start-up error
 /// report tell a graphics back-end failure (before the first frames) from a

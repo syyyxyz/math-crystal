@@ -41,6 +41,7 @@ const EXAMPLES: &[(&str, &str, &str)] = &[
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Workspace {
+    Plane,
     Calculus,
     Space,
     Complex,
@@ -55,6 +56,7 @@ enum CanvasMode {
 
 pub struct MathCrystal {
     workspace: Workspace,
+    plane: crate::curve2d_app::PlaneWorkspace,
     calc: CalcWorkspace,
     space: crate::space_app::SpaceWorkspace,
     complex: crate::complex_app::ComplexWorkspace,
@@ -83,6 +85,7 @@ impl MathCrystal {
         );
         let mut app = Self {
             workspace: Workspace::Calculus,
+            plane: crate::curve2d_app::PlaneWorkspace::default(),
             calc: CalcWorkspace::new(DEFAULT_FUNCTION),
             space: crate::space_app::SpaceWorkspace::default(),
             complex: crate::complex_app::ComplexWorkspace::default(),
@@ -100,12 +103,14 @@ impl MathCrystal {
     pub fn session(&self) -> crate::session::Session {
         crate::session::Session {
             workspace: match self.workspace {
+                Workspace::Plane => "plane",
                 Workspace::Calculus => "calculus",
                 Workspace::Space => "space",
                 Workspace::Complex => "complex",
                 Workspace::Spectrum => "spectrum",
             }
             .into(),
+            plane: Some(self.plane.state()),
             calc: Some(self.calc.state()),
             space: Some(self.space.state()),
             complex: Some(self.complex.state()),
@@ -115,11 +120,15 @@ impl MathCrystal {
 
     pub fn restore(&mut self, s: crate::session::Session) {
         self.workspace = match s.workspace.as_str() {
+            "plane" => Workspace::Plane,
             "space" => Workspace::Space,
             "complex" => Workspace::Complex,
             "spectrum" => Workspace::Spectrum,
             _ => Workspace::Calculus,
         };
+        if let Some(c) = s.plane {
+            self.plane.restore(c);
+        }
         if let Some(c) = s.calc {
             self.calc.restore(c);
         }
@@ -132,6 +141,15 @@ impl MathCrystal {
         if let Some(c) = s.spectrum {
             self.spectrum.restore(c);
         }
+    }
+
+    /// Show the Plane curves workspace (used by the preview example).
+    pub fn show_plane(&mut self) {
+        self.workspace = Workspace::Plane;
+    }
+
+    pub fn plane_mut(&mut self) -> &mut crate::curve2d_app::PlaneWorkspace {
+        &mut self.plane
     }
 
     pub fn complex_mut(&mut self) -> &mut crate::complex_app::ComplexWorkspace {
@@ -185,6 +203,7 @@ impl MathCrystal {
                         ui,
                         &mut self.workspace,
                         &[
+                            (Workspace::Plane, &with_icon(icon::CURVE, tr("Plane", "平面曲线")), tr("Curves in the plane: y = f(x), implicit, polar, parametric, regions", "平面曲线：函数、隐函数、极坐标、参数方程与区域")),
                             (Workspace::Calculus, &with_icon(icon::FUNCTION, tr("Calculus", "多元微积分")), tr("Functions of two variables", "二元函数")),
                             (Workspace::Space, &with_icon(icon::CUBE, tr("Space", "空间几何")), tr("Surfaces, lines and solids in space", "空间中的曲面、直线与立体")),
                             (Workspace::Complex, &with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions w = f(z)", "复变函数 w = f(z)")),
@@ -204,6 +223,7 @@ impl MathCrystal {
                         if ui.button(with_icon(icon::TRANSLATE, other)).on_hover_text(tr("Interface language", "界面语言")).clicked() {
                             i18n::set_zh(!i18n::zh());
                             // Error messages come from the parser: re-run it.
+                            self.plane.relocalize();
                             self.calc.relocalize();
                             self.space.relocalize();
                             self.complex.relocalize();
@@ -248,6 +268,16 @@ impl MathCrystal {
                     row(ui, "< <= == != and or", tr("Comparisons; chains like 0 < x < 1", "比较运算；可连写 0 < x < 1"));
                     row(ui, "pi  e  tau", tr("Constants", "常数"));
                     row(ui, "a  k  T  ω", tr("Other letters are parameters with sliders", "其他字母是参数，会出现滑块"));
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new(tr("Plane curves", "平面曲线")).strong());
+                egui::Grid::new("help_plane").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    row(ui, "y = sin(x)   x = y^2", tr("Graphs over x or over y; f(x) = … works too", "函数图像（关于 x 或 y）；也可写 f(x) = …"));
+                    row(ui, "x^3 + y^3 = 3x y", tr("Implicit curve: any other equation in x, y", "隐函数：x、y 的其他任意方程"));
+                    row(ui, "r = 1 + cos(θ)   r^2 = 4cos(2θ)", tr("Polar (θ, theta or \\theta; ρ for r)", "极坐标（θ 可写 theta 或 \\theta；r 也可写 ρ）"));
+                    row(ui, "(t - sin(t), 1 - cos(t))", tr("Parametric in t, with its own range", "参数方程（参数 t，可设范围）"));
+                    row(ui, "x^2 + y^2 <= 4, y >= x", tr("Region; strict inequalities have dashed edges", "区域；严格不等式的边界为虚线"));
+                    row(ui, tr("Click a curve", "单击曲线"), tr("Point with tangent, normal and circle of curvature", "选点，显示切线、法线与曲率圆"));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(tr("Space geometry", "空间几何")).strong());
@@ -322,6 +352,7 @@ impl eframe::App for MathCrystal {
         self.top_bar(ui);
         let ctx = ui.ctx().clone();
         match self.workspace {
+            Workspace::Plane => self.plane.ui(ui, frame),
             Workspace::Calculus => self.calc.ui(ui, frame),
             Workspace::Space => self.space.ui(ui, frame),
             Workspace::Complex => self.complex.ui(ui, frame),

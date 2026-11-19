@@ -13,8 +13,9 @@ pub const KEY: &str = "session";
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(default)]
 pub struct Session {
-    /// "calculus", "space", "complex" or "spectrum".
+    /// "plane", "calculus", "space", "complex" or "spectrum".
     pub workspace: String,
+    pub plane: Option<PlaneState>,
     pub calc: Option<CalcState>,
     pub space: Option<SpaceState>,
     pub complex: Option<ComplexState>,
@@ -101,6 +102,30 @@ pub struct SolidState {
     pub size: [f64; 3],
 }
 
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct PlaneState {
+    pub curves: Vec<PlaneCurveState>,
+    /// View centre, half of the visible x range, y units per x unit on screen.
+    pub center: (f64, f64),
+    pub half: f64,
+    pub aspect: f64,
+    pub equal: bool,
+    pub params: Vec<ParamState>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct PlaneCurveState {
+    pub src: String,
+    pub color: usize,
+    pub visible: bool,
+    /// Range of t or θ.
+    pub range: (f64, f64),
+    /// Special points shown (bits, see `curve2d::features`).
+    pub marks: u8,
+}
+
 /// A usable axis range: finite with lo < hi.
 pub fn range_ok(r: (f64, f64)) -> bool {
     r.0.is_finite() && r.1.is_finite() && r.0 < r.1
@@ -160,6 +185,22 @@ mod tests {
         let saved = via_ron(&Session { space: Some(st.clone()), ..Default::default() });
         space.restore(saved.space.unwrap());
         assert_eq!(space.state(), st);
+
+        // Plane curves: a graph with a parameter and marks, a polar curve with its range.
+        let mut plane = crate::curve2d_app::PlaneWorkspace::new();
+        let st = PlaneState {
+            curves: vec![
+                PlaneCurveState { src: "y = a sin(x)".into(), color: 2, visible: true, range: (0.0, std::f64::consts::TAU), marks: 3 },
+                PlaneCurveState { src: "r = 1 + cos(θ)".into(), color: 1, visible: false, range: (0.0, 3.0), marks: 0 },
+            ],
+            center: (1.0, -2.0),
+            half: 4.5,
+            aspect: 1.0,
+            equal: true,
+            params: vec![ParamState { name: "a".into(), value: 2.0, lo: -3.0, hi: 3.0 }],
+        };
+        plane.restore(via_ron(&Session { plane: Some(st.clone()), ..Default::default() }).plane.unwrap());
+        assert_eq!(plane.state(), st);
 
         // Complex and spectrum.
         let mut st = crate::complex_app::ComplexWorkspace::new("1/(z - c)").state();

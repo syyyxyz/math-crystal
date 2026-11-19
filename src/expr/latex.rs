@@ -600,7 +600,8 @@ impl Conv {
             "sigma" => " σ ".into(),
             "omega" => " ω ".into(),
             "phi" | "varphi" => " φ ".into(),
-            "theta" => " θ ".into(),
+            "theta" | "vartheta" => " θ ".into(),
+            "rho" | "varrho" => " ρ ".into(),
             "le" | "leq" | "leqslant" => " <= ".into(),
             "ge" | "geq" | "geqslant" => " >= ".into(),
             "ne" | "neq" => " != ".into(),
@@ -781,7 +782,10 @@ impl Conv {
             let take = match self.peek() {
                 Some(T::Ch(c)) => c.is_alphanumeric() || *c == '.' || (*c == '^' && !out.is_empty()),
                 Some(T::Open) => true,
-                Some(T::Cmd(c)) => matches!(c.as_str(), "pi" | "tau" | "frac" | "dfrac" | "tfrac" | "sqrt" | "mathrm"),
+                Some(T::Cmd(c)) => matches!(
+                    c.as_str(),
+                    "pi" | "tau" | "frac" | "dfrac" | "tfrac" | "sqrt" | "mathrm" | "theta" | "vartheta" | "phi" | "varphi" | "alpha" | "beta" | "omega" | "rho" | "lambda" | "mu"
+                ),
                 _ => false,
             };
             if !take {
