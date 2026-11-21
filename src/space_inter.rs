@@ -18,7 +18,7 @@ use crate::ui::theme::{Tokens, icon};
 use crate::ui::widgets::{caption, card, eye, segmented};
 
 /// Coordinate plane for projections.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Proj {
     Off,
     XOy,
@@ -39,7 +39,7 @@ impl Proj {
 }
 
 /// How the objects themselves are drawn next to their intersections.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Originals {
     Show,
     Faint,

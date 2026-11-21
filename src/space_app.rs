@@ -81,7 +81,7 @@ fn scenes() -> Vec<(&'static str, &'static str, Vec<Object>)> {
     ]
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 enum Quality {
     Coarse,
     Medium,
@@ -94,6 +94,43 @@ impl Quality {
             Quality::Coarse => 48,
             Quality::Medium => 80,
             Quality::Fine => 128,
+        }
+    }
+}
+
+/// Saved view of the Space workspace: camera, mesh quality, layers and the
+/// intersection tools.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SpaceView {
+    camera: crate::session::CameraState,
+    quality: Quality,
+    show_axes: bool,
+    show_grid: bool,
+    show_legend: bool,
+    inter_show: bool,
+    originals: crate::space_inter::Originals,
+    projection: crate::space_inter::Proj,
+    section_on: bool,
+    section_axis: usize,
+    section_value: f64,
+}
+
+impl Default for SpaceView {
+    fn default() -> Self {
+        let i = crate::space_inter::Inter::default();
+        Self {
+            camera: Default::default(),
+            quality: Quality::Medium,
+            show_axes: true,
+            show_grid: false,
+            show_legend: true,
+            inter_show: i.show,
+            originals: i.originals,
+            projection: i.projection,
+            section_on: i.section.on,
+            section_axis: i.section.axis,
+            section_value: i.section.value,
         }
     }
 }
@@ -235,6 +272,38 @@ impl SpaceWorkspace {
             })
             .collect();
         crate::session::SpaceState { objects, xr: self.xr, yr: self.yr, zr: self.zr, equal: self.equal, params: self.params.state() }
+    }
+
+    pub fn view_state(&self) -> SpaceView {
+        let i = &self.inter;
+        SpaceView {
+            camera: self.view.state(),
+            quality: self.quality,
+            show_axes: self.show_axes,
+            show_grid: self.show_grid,
+            show_legend: self.show_legend,
+            inter_show: i.show,
+            originals: i.originals,
+            projection: i.projection,
+            section_on: i.section.on,
+            section_axis: i.section.axis,
+            section_value: i.section.value,
+        }
+    }
+
+    pub fn restore_view(&mut self, v: SpaceView) {
+        self.view.restore(&v.camera);
+        self.quality = v.quality;
+        self.show_axes = v.show_axes;
+        self.show_grid = v.show_grid;
+        self.show_legend = v.show_legend;
+        let i = &mut self.inter;
+        i.show = v.inter_show;
+        i.originals = v.originals;
+        i.projection = v.projection;
+        if v.section_axis < 3 && v.section_value.is_finite() {
+            (i.section.on, i.section.axis, i.section.value) = (v.section_on, v.section_axis, v.section_value);
+        }
     }
 
     /// Put back a saved scene; its object cards start folded.

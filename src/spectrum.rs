@@ -15,7 +15,7 @@ use crate::expr::{Id, Pool, Program, Vars, parse_with_params};
 pub const VARS: [&str; 1] = ["t"];
 const TAU: f64 = std::f64::consts::TAU;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Convention {
     /// ω in rad per unit time: F(ω) = ∫ f e^{−iωt} dt, f = (1/2π) ∫ F e^{iωt} dω.
     Angular,

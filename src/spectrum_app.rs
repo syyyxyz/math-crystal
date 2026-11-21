@@ -37,7 +37,7 @@ const EXAMPLES: &[(&str, &str, &str)] = &[
     ("LaTeX: e^{−t²} cos 5t", "LaTeX：e^{−t²} cos 5t", "e^{-t^2}\\cos(5t)"),
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum View {
     MagPhase,
     ReIm,
@@ -51,6 +51,38 @@ struct Stats {
     band99: f64,
     sym: Symmetry,
     integral: C64,
+}
+
+/// Saved view of the Spectrum workspace: convention, ranges, markers,
+/// reconstruction, sampling and the plot panels.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SpectrumView {
+    conv: Convention,
+    auto_window: bool,
+    window: (f64, f64),
+    auto_w: bool,
+    w_max: f64,
+    view: View,
+    db: bool,
+    w0: f64,
+    show_w0: bool,
+    t0: f64,
+    show_t0: bool,
+    recon_on: bool,
+    recon_w: f64,
+    samp_on: bool,
+    samp_ts: f64,
+    samp_auto_n: bool,
+    samp_n: usize,
+    heights: [f32; 3],
+    panel_open: [bool; 3],
+}
+
+impl Default for SpectrumView {
+    fn default() -> Self {
+        SpectrumWorkspace::new("rect(t)").view_state()
+    }
 }
 
 pub struct SpectrumWorkspace {
@@ -201,6 +233,72 @@ impl SpectrumWorkspace {
     /// The inputs worth keeping across restarts.
     pub fn state(&self) -> crate::session::SpectrumState {
         crate::session::SpectrumState { src: self.src.clone(), params: self.params.state() }
+    }
+
+    pub fn view_state(&self) -> SpectrumView {
+        SpectrumView {
+            conv: self.conv,
+            auto_window: self.auto_window,
+            window: self.window,
+            auto_w: self.auto_w,
+            w_max: self.w_max,
+            view: self.view,
+            db: self.db,
+            w0: self.w0,
+            show_w0: self.show_w0,
+            t0: self.t0,
+            show_t0: self.show_t0,
+            recon_on: self.recon_on,
+            recon_w: self.recon_w,
+            samp_on: self.samp_on,
+            samp_ts: self.samp_ts,
+            samp_auto_n: self.samp_auto_n,
+            samp_n: self.samp_n,
+            heights: self.heights,
+            panel_open: self.panel_open,
+        }
+    }
+
+    /// Put back a saved view; call after [`Self::restore`] so the
+    /// reconstruction band and sampling period are not re-chosen for a
+    /// "new" signal.
+    pub fn restore_view(&mut self, v: SpectrumView) {
+        let fin = |x: f64| x.is_finite() && x.abs() < 1e9;
+        self.conv = v.conv;
+        if crate::session::range_ok(v.window) {
+            self.window = v.window;
+            self.auto_window = v.auto_window;
+        }
+        if fin(v.w_max) && v.w_max > 0.0 {
+            self.w_max = v.w_max;
+            self.auto_w = v.auto_w;
+        }
+        self.view = v.view;
+        self.db = v.db;
+        if fin(v.w0) {
+            self.w0 = v.w0;
+        }
+        self.show_w0 = v.show_w0;
+        if fin(v.t0) {
+            self.t0 = v.t0;
+        }
+        self.show_t0 = v.show_t0;
+        self.recon_on = v.recon_on;
+        if fin(v.recon_w) && v.recon_w > 0.0 {
+            self.recon_w = v.recon_w;
+            self.recon_fresh = false;
+        }
+        self.samp_on = v.samp_on;
+        if fin(v.samp_ts) && v.samp_ts > 0.0 {
+            self.samp_ts = v.samp_ts;
+            self.samp_fresh = false;
+        }
+        self.samp_auto_n = v.samp_auto_n;
+        self.samp_n = v.samp_n.clamp(2, 512);
+        if v.heights.iter().all(|h| h.is_finite()) {
+            self.heights = v.heights.map(|h| h.clamp(MIN_H, 1600.0));
+        }
+        self.panel_open = v.panel_open;
     }
 
     pub fn restore(&mut self, s: crate::session::SpectrumState) {

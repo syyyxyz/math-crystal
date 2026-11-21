@@ -10,7 +10,8 @@ use crate::render::scene::{Frame3, GridStyle, MeshData, height_mesh, lin};
 const TAU: f64 = std::f64::consts::TAU;
 
 /// Domain-colouring options.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Style {
     /// Lightness from |f|: zeros black, poles white.
     pub lightness: bool,
@@ -128,7 +129,7 @@ pub fn image(ws: &[C64], w: usize, h: usize, st: &Style, grid_step: f64) -> egui
     egui::ColorImage::new([w, h], px)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Height {
     Modulus,
     LogModulus,

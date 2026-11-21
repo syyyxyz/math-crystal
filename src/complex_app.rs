@@ -42,7 +42,7 @@ const EXAMPLES: &[(&str, &str, &str)] = &[
     ("LaTeX: e^z / (z² + 1)", "LaTeX：e^z / (z² + 1)", "\\frac{e^{z}}{z^2 + 1}"),
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Mode {
     Colour,
     Relief,
@@ -53,6 +53,41 @@ enum Mode {
 enum Shade {
     Phase,
     Lightness,
+}
+
+/// Saved view of the Complex workspace: mode, z₀, colouring, relief,
+/// mapping grid, contour circle and the w-plane window.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ComplexView {
+    mode: Mode,
+    z0: (f64, f64),
+    show_z0: bool,
+    style: Style,
+    res: f32,
+    show_specials: bool,
+    contour_c: (f64, f64),
+    contour_r: f64,
+    show_contour: bool,
+    height: Height,
+    relief_n: usize,
+    wire: bool,
+    camera: crate::session::CameraState,
+    grid_n: usize,
+    polar: bool,
+    /// Centre and half-extent of the w-plane in the mapping view.
+    w_center: (f64, f64),
+    w_half: f64,
+}
+
+impl Default for ComplexView {
+    fn default() -> Self {
+        let s = ComplexWorkspace::new("z");
+        let mut v = s.view_state();
+        // No saved w-plane: fit it to the image.
+        v.w_half = 0.0;
+        v
+    }
 }
 
 pub struct ComplexWorkspace {
@@ -231,6 +266,62 @@ impl ComplexWorkspace {
             center: (self.plane.center.re, self.plane.center.im),
             half: self.plane.half,
             params: self.params.state(),
+        }
+    }
+
+    pub fn view_state(&self) -> ComplexView {
+        let p = |z: C64| (z.re, z.im);
+        ComplexView {
+            mode: self.mode,
+            z0: p(self.z0),
+            show_z0: self.show_z0,
+            style: self.style,
+            res: self.res,
+            show_specials: self.show_specials,
+            contour_c: p(self.contour_c),
+            contour_r: self.contour_r,
+            show_contour: self.show_contour,
+            height: self.height,
+            relief_n: self.relief_n,
+            wire: self.wire,
+            camera: self.view.state(),
+            grid_n: self.grid_n,
+            polar: self.polar,
+            w_center: p(self.wplane.center),
+            w_half: self.wplane.half,
+        }
+    }
+
+    /// Put back a saved view; call after [`Self::restore`] (the w-plane is
+    /// kept only for the restored function).
+    pub fn restore_view(&mut self, v: ComplexView) {
+        let ok = |z: (f64, f64)| z.0.is_finite() && z.1.is_finite() && z.0.abs() < 1e12 && z.1.abs() < 1e12;
+        self.mode = v.mode;
+        if ok(v.z0) {
+            self.z0 = c(v.z0.0, v.z0.1);
+        }
+        self.show_z0 = v.show_z0;
+        self.style = v.style;
+        if v.res.is_finite() {
+            self.res = v.res.clamp(0.2, 1.0);
+        }
+        self.show_specials = v.show_specials;
+        if ok(v.contour_c) && v.contour_r.is_finite() && v.contour_r > 0.0 {
+            (self.contour_c, self.contour_r) = (c(v.contour_c.0, v.contour_c.1), v.contour_r);
+        }
+        self.show_contour = v.show_contour;
+        self.height = v.height;
+        self.relief_n = v.relief_n.clamp(41, 321);
+        self.wire = v.wire;
+        self.view.restore(&v.camera);
+        self.grid_n = v.grid_n.clamp(3, 24);
+        self.polar = v.polar;
+        if ok(v.w_center) && v.w_half.is_finite() && v.w_half > 0.0 {
+            self.wplane = Plane::new(c(v.w_center.0, v.w_center.1), v.w_half);
+            // The window was fitted (or moved) for this function and grid already.
+            if let Some(f) = &self.func {
+                self.wfit_key = format!("{}|{}|{}", f.source, self.grid_n, self.polar);
+            }
         }
     }
 
@@ -1071,30 +1162,9 @@ impl ComplexWorkspace {
 
     fn overlays(&mut self, ui: &mut Ui, rect: Rect, t: &Tokens) {
         let inner = rect.shrink(12.0);
-        // Top-left: values at z0 (not over the split mapping view).
-        if self.show_z0
-            && self.mode != Mode::Mapping
-            && let Some(f) = &self.func
-        {
-            let mut tl = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
-            let w = f.eval(self.z0);
-            overlay_frame(t).show(&mut tl, |ui| {
-                egui::Grid::new("z0_vals").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
-                    let row = |ui: &mut Ui, k: &str, v: String| {
-                        ui.label(RichText::new(k).color(t.muted));
-                        ui.label(RichText::new(v).monospace().color(t.text));
-                        ui.end_row();
-                    };
-                    row(ui, "z₀", fmt_cs(self.z0));
-                    row(ui, "f(z₀)", fmt_cs(w));
-                    row(ui, "|f|", fmt_short(w.norm()));
-                    row(ui, "arg f", deg(w.arg()));
-                });
-            });
-        }
         // Top-right: mode switch, 3D controls, export.
         let mut top_right = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::right_to_left(Align::Min)));
-        overlay_frame(t).inner_margin(egui::Margin::same(5)).show(&mut top_right, |ui| {
+        let toolbar = overlay_frame(t).inner_margin(egui::Margin::same(5)).show(&mut top_right, |ui| {
             ui.horizontal(|ui| {
                 if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(crate::ui::export::hint(tr("Save the view as PNG in", "把视图保存为 PNG，位置："))).clicked() {
                     self.export.start();
@@ -1115,7 +1185,31 @@ impl ComplexWorkspace {
                     ],
                 );
             });
-        });
+        }).response.rect;
+        // Top-left: values at z0 (not over the split mapping view).
+        if self.show_z0
+            && self.mode != Mode::Mapping
+            && let Some(f) = &self.func
+        {
+            let width_id = ui.scope_id().with("z0_panel_w");
+            let area = crate::ui::widgets::top_left_room(ui, inner, toolbar, width_id);
+            let mut tl = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
+            let w = f.eval(self.z0);
+            let shown = overlay_frame(t).show(&mut tl, |ui| {
+                egui::Grid::new("z0_vals").num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
+                    let row = |ui: &mut Ui, k: &str, v: String| {
+                        ui.label(RichText::new(k).color(t.muted));
+                        ui.label(RichText::new(v).monospace().color(t.text));
+                        ui.end_row();
+                    };
+                    row(ui, "z₀", fmt_cs(self.z0));
+                    row(ui, "f(z₀)", fmt_cs(w));
+                    row(ui, "|f|", fmt_short(w.norm()));
+                    row(ui, "arg f", deg(w.arg()));
+                });
+            });
+            crate::ui::widgets::remember_overlay(ui, width_id, shown.response.rect);
+        }
         // Bottom-left: colour wheel.
         if self.mode != Mode::Mapping {
             colour_wheel(ui, pos2(inner.left() + 46.0, inner.bottom() - 46.0), &self.style, t);

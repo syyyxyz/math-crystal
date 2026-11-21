@@ -1,14 +1,23 @@
-//! What survives a restart: the formulas and inputs of each workspace and
-//! the open workspace. Views, caches and which cards are open are not kept,
-//! so every start begins with the folded default layout. Stored by eframe
-//! (RON, key [`KEY`]) in its app data file.
+//! What survives a restart: the formulas and inputs of each workspace, the
+//! open workspace and the tab order (key [`KEY`]), and separately per
+//! workspace how it was being looked at — camera, display mode, layers,
+//! chosen points (keys [`view_key`]). Caches and which cards are open are
+//! not kept, so every start begins with the folded card layout. Stored by
+//! eframe (RON) in its app data file.
 //!
 //! Every field has a default, so a file written by an older or newer
-//! version still loads; nonsensical values are ignored on restore.
+//! version still loads; nonsensical values are ignored on restore. The view
+//! states sit under their own keys so that one that no longer parses (say an
+//! enum variant was renamed) loses only that workspace's view.
 
 use serde::{Deserialize, Serialize};
 
 pub const KEY: &str = "session";
+
+/// Key of the view state of a workspace ("plane", "calculus", …).
+pub fn view_key(workspace: &str) -> String {
+    format!("view.{workspace}")
+}
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(default)]
@@ -20,6 +29,32 @@ pub struct Session {
     pub space: Option<SpaceState>,
     pub complex: Option<ComplexState>,
     pub spectrum: Option<SpectrumState>,
+    /// Workspace names in the order of the tabs.
+    pub tabs: Vec<String>,
+}
+
+/// Camera of a 3D canvas.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct CameraState {
+    /// "iso", "front", "side", "top" or "custom".
+    pub preset: String,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dist: f32,
+    pub target: [f32; 3],
+    pub ortho: bool,
+    pub fov_deg: f32,
+    pub outline_only: bool,
+    /// Projection chosen before a 2D drawing forced orthographic.
+    pub ortho_before: Option<bool>,
+}
+
+impl Default for CameraState {
+    fn default() -> Self {
+        let c = crate::render::scene::Camera::default();
+        Self { preset: "iso".into(), yaw: c.yaw, pitch: c.pitch, dist: c.dist, target: c.target.to_array(), ortho: c.ortho, fov_deg: c.fov_deg, outline_only: false, ortho_before: None }
+    }
 }
 
 /// A parameter slider.
@@ -213,6 +248,78 @@ mod tests {
         let mut spec = crate::spectrum_app::SpectrumWorkspace::new("t");
         spec.restore(st.clone());
         assert_eq!(spec.state(), st);
+    }
+
+    /// View states compared through their RON text.
+    fn ron_of<T: Serialize>(v: &T) -> String {
+        ron::to_string(v).unwrap()
+    }
+
+    #[test]
+    fn views_round_trip() {
+        // Plane: a point Q, a chosen point on the second curve, layers, integral.
+        let mut plane = crate::curve2d_app::PlaneWorkspace::new();
+        plane.load_scene(0);
+        let mut v: crate::curve2d_app::PlaneView = ron::from_str(&ron_of(&plane.view_state())).unwrap();
+        let text = ron_of(&v)
+            .replace("ext:None", "ext:Some((1.5,-2.0))")
+            .replace("pick:None", "pick:Some((1,0.5,0.5,-0.9375))")
+            .replace("show_labels:false", "show_labels:true")
+            .replace("show_normal:false", "show_normal:true");
+        v = ron::from_str(&text).unwrap();
+        let st = plane.state();
+        let mut fresh = crate::curve2d_app::PlaneWorkspace::new();
+        fresh.restore(via_ron(&Session { plane: Some(st), ..Default::default() }).plane.unwrap());
+        fresh.restore_view(ron::from_str(&ron_of(&v)).unwrap());
+        let back = ron_of(&fresh.view_state());
+        assert!(back.contains("ext:Some((1.5,-2.0))"), "{back}");
+        assert!(back.contains("pick:Some((1,0.5,"), "{back}");
+        assert!(back.contains("show_labels:true") && back.contains("show_normal:true"), "{back}");
+
+        // Complex: the relief mode with a moved camera survives.
+        let complex = crate::complex_app::ComplexWorkspace::new("z^2");
+        let text = ron_of(&complex.view_state()).replace("mode:Colour", "mode:Relief").replace("height:Modulus", "height:Re").replace("grid_n:10", "grid_n:14");
+        assert!(text.contains("mode:Relief") && text.contains("height:Re") && text.contains("grid_n:14"));
+        let mut fresh = crate::complex_app::ComplexWorkspace::new("z^2");
+        fresh.restore_view(ron::from_str(&text).unwrap());
+        assert_eq!(ron_of(&fresh.view_state()), text);
+
+        // Calculus: map mode, layers on.
+        let calc = crate::app::CalcWorkspace::new("x*y");
+        let text = ron_of(&calc.view_state()).replace("mode:Surface", "mode:Map").replace("show_point:false", "show_point:true").replace("show_gradient:false", "show_gradient:true");
+        assert!(text.contains("mode:Map") && text.contains("show_point:true") && text.contains("show_gradient:true"));
+        let mut fresh = crate::app::CalcWorkspace::new("x*y");
+        fresh.restore_view(ron::from_str(&text).unwrap());
+        assert_eq!(ron_of(&fresh.view_state()), text);
+
+        // Space and spectrum.
+        let space = crate::space_app::SpaceWorkspace::new();
+        let text = ron_of(&space.view_state()).replace("projection:Off", "projection:XOy").replace("show_grid:false", "show_grid:true");
+        assert!(text.contains("projection:XOy") && text.contains("show_grid:true"));
+        let mut fresh = crate::space_app::SpaceWorkspace::new();
+        fresh.restore_view(ron::from_str(&text).unwrap());
+        assert_eq!(ron_of(&fresh.view_state()), text);
+        let spec = crate::spectrum_app::SpectrumWorkspace::new("rect(t)");
+        let text = ron_of(&spec.view_state()).replace("samp_on:false", "samp_on:true").replace("db:false", "db:true");
+        assert!(text.contains("samp_on:true") && text.contains("db:true"));
+        let mut fresh = crate::spectrum_app::SpectrumWorkspace::new("rect(t)");
+        fresh.restore_view(ron::from_str(&text).unwrap());
+        assert_eq!(ron_of(&fresh.view_state()), text);
+    }
+
+    #[test]
+    fn camera_round_trip_and_nonsense() {
+        let mut v = crate::ui::canvas3d::View3d::planar();
+        v.apply_preset(crate::ui::canvas3d::ViewPreset::Top);
+        v.camera.dist = 0.7;
+        let st = v.state();
+        let mut w = crate::ui::canvas3d::View3d::planar();
+        w.restore(&ron::from_str(&ron_of(&st)).unwrap());
+        assert_eq!(w.state(), st);
+        let before = w.state();
+        w.restore(&CameraState { dist: f32::NAN, ..st.clone() });
+        w.restore(&CameraState { preset: "sideways".into(), ..st });
+        assert_eq!(w.state(), before);
     }
 
     #[test]

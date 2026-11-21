@@ -61,6 +61,63 @@ impl View3d {
         Self { planar: true, ..Default::default() }
     }
 
+    /// Camera and drawing mode, for the saved session.
+    pub fn state(&self) -> crate::session::CameraState {
+        let c = &self.camera;
+        crate::session::CameraState {
+            preset: match self.preset {
+                ViewPreset::Iso => "iso",
+                ViewPreset::Front => "front",
+                ViewPreset::Side => "side",
+                ViewPreset::Top => "top",
+                ViewPreset::Custom => "custom",
+            }
+            .into(),
+            yaw: c.yaw,
+            pitch: c.pitch,
+            dist: c.dist,
+            target: c.target.to_array(),
+            ortho: c.ortho,
+            fov_deg: c.fov_deg,
+            outline_only: self.outline_only,
+            ortho_before: self.ortho_before,
+        }
+    }
+
+    /// Put back a saved camera; nonsense keeps the current one.
+    pub fn restore(&mut self, s: &crate::session::CameraState) {
+        let preset = match s.preset.as_str() {
+            "iso" => ViewPreset::Iso,
+            "front" => ViewPreset::Front,
+            "side" => ViewPreset::Side,
+            "top" => ViewPreset::Top,
+            "custom" => ViewPreset::Custom,
+            _ => return,
+        };
+        let finite = [s.yaw, s.pitch, s.dist, s.fov_deg].iter().chain(&s.target).all(|v| v.is_finite());
+        if !finite || s.dist <= 0.0 || s.dist > 1e4 || s.target.iter().any(|v| v.abs() > 1e6) {
+            return;
+        }
+        self.camera = Camera {
+            yaw: s.yaw,
+            pitch: s.pitch.clamp(-1.5705, 1.5705),
+            dist: s.dist,
+            target: Vec3::from_array(s.target),
+            ortho: s.ortho,
+            fov_deg: s.fov_deg.clamp(10.0, 80.0),
+        };
+        self.preset = preset;
+        if self.plane_axes().is_some() {
+            self.camera.ortho = true;
+            self.ortho_before = s.ortho_before;
+        } else {
+            self.ortho_before = None;
+        }
+        self.outline_only = s.outline_only;
+        // Perspective zoom has a lower limit.
+        self.camera.zoom(1.0);
+    }
+
     pub fn adapter(&self) -> String {
         self.gpu.as_ref().map(|g| g.adapter.clone()).unwrap_or_default()
     }

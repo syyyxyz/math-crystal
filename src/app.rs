@@ -39,7 +39,7 @@ const EXAMPLES: &[(&str, &str, &str)] = &[
     ("LaTeX: fraction and root", "LaTeX：分式与根式", "\\frac{\\sin(\\pi x)}{1 + \\sqrt{x^2 + y^2}}"),
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Workspace {
     Plane,
     Calculus,
@@ -48,7 +48,38 @@ enum Workspace {
     Spectrum,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl Workspace {
+    /// Default tab order.
+    const ALL: [Workspace; 5] = [Workspace::Plane, Workspace::Calculus, Workspace::Space, Workspace::Complex, Workspace::Spectrum];
+
+    /// Name in the saved session.
+    fn name(self) -> &'static str {
+        match self {
+            Workspace::Plane => "plane",
+            Workspace::Calculus => "calculus",
+            Workspace::Space => "space",
+            Workspace::Complex => "complex",
+            Workspace::Spectrum => "spectrum",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|w| w.name() == s)
+    }
+
+    /// Tab label and tooltip.
+    fn tab(self) -> (String, &'static str) {
+        match self {
+            Workspace::Plane => (with_icon(icon::CURVE, tr("Plane", "平面曲线")), tr("Curves in the plane: y = f(x), implicit, polar, parametric, regions", "平面曲线：函数、隐函数、极坐标、参数方程与区域")),
+            Workspace::Calculus => (with_icon(icon::FUNCTION, tr("Calculus", "多元微积分")), tr("Functions of two variables", "二元函数")),
+            Workspace::Space => (with_icon(icon::CUBE, tr("Space", "空间几何")), tr("Surfaces, lines and solids in space", "空间中的曲面、直线与立体")),
+            Workspace::Complex => (with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions w = f(z)", "复变函数 w = f(z)")),
+            Workspace::Spectrum => (with_icon(icon::SINE, tr("Spectrum", "频谱")), tr("Fourier transform of an absolutely integrable f(t)", "绝对可积信号 f(t) 的傅里叶变换")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum CanvasMode {
     Surface,
     Map,
@@ -56,6 +87,8 @@ enum CanvasMode {
 
 pub struct MathCrystal {
     workspace: Workspace,
+    /// Tabs in the order shown (the user can drag them).
+    tabs: Vec<Workspace>,
     plane: crate::curve2d_app::PlaneWorkspace,
     calc: CalcWorkspace,
     space: crate::space_app::SpaceWorkspace,
@@ -85,6 +118,7 @@ impl MathCrystal {
         );
         let mut app = Self {
             workspace: Workspace::Calculus,
+            tabs: Workspace::ALL.to_vec(),
             plane: crate::curve2d_app::PlaneWorkspace::default(),
             calc: CalcWorkspace::new(DEFAULT_FUNCTION),
             space: crate::space_app::SpaceWorkspace::default(),
@@ -93,23 +127,52 @@ impl MathCrystal {
             logo: Some(logo),
             show_help: false,
         };
-        if let Some(saved) = cc.storage.and_then(|s| eframe::get_value::<crate::session::Session>(s, crate::session::KEY)) {
-            app.restore(saved);
+        if let Some(storage) = cc.storage {
+            if let Some(saved) = eframe::get_value::<crate::session::Session>(storage, crate::session::KEY) {
+                app.restore(saved);
+            }
+            app.restore_views(storage);
         }
         app
+    }
+
+    /// Save how each workspace was being looked at, each under its own key.
+    fn save_views(&self, storage: &mut dyn eframe::Storage) {
+        use crate::session::view_key;
+        eframe::set_value(storage, &view_key(Workspace::Plane.name()), &self.plane.view_state());
+        eframe::set_value(storage, &view_key(Workspace::Calculus.name()), &self.calc.view_state());
+        eframe::set_value(storage, &view_key(Workspace::Space.name()), &self.space.view_state());
+        eframe::set_value(storage, &view_key(Workspace::Complex.name()), &self.complex.view_state());
+        eframe::set_value(storage, &view_key(Workspace::Spectrum.name()), &self.spectrum.view_state());
+    }
+
+    /// Put back the saved views; after [`Self::restore`], since they refer
+    /// to the restored curves and functions.
+    fn restore_views(&mut self, storage: &dyn eframe::Storage) {
+        use crate::session::view_key;
+        let key = |w: Workspace| view_key(w.name());
+        if let Some(v) = eframe::get_value(storage, &key(Workspace::Plane)) {
+            self.plane.restore_view(v);
+        }
+        if let Some(v) = eframe::get_value(storage, &key(Workspace::Calculus)) {
+            self.calc.restore_view(v);
+        }
+        if let Some(v) = eframe::get_value(storage, &key(Workspace::Space)) {
+            self.space.restore_view(v);
+        }
+        if let Some(v) = eframe::get_value(storage, &key(Workspace::Complex)) {
+            self.complex.restore_view(v);
+        }
+        if let Some(v) = eframe::get_value(storage, &key(Workspace::Spectrum)) {
+            self.spectrum.restore_view(v);
+        }
     }
 
     /// Formulas and inputs of every workspace, for the next start.
     pub fn session(&self) -> crate::session::Session {
         crate::session::Session {
-            workspace: match self.workspace {
-                Workspace::Plane => "plane",
-                Workspace::Calculus => "calculus",
-                Workspace::Space => "space",
-                Workspace::Complex => "complex",
-                Workspace::Spectrum => "spectrum",
-            }
-            .into(),
+            workspace: self.workspace.name().into(),
+            tabs: self.tabs.iter().map(|w| w.name().to_string()).collect(),
             plane: Some(self.plane.state()),
             calc: Some(self.calc.state()),
             space: Some(self.space.state()),
@@ -119,13 +182,15 @@ impl MathCrystal {
     }
 
     pub fn restore(&mut self, s: crate::session::Session) {
-        self.workspace = match s.workspace.as_str() {
-            "plane" => Workspace::Plane,
-            "space" => Workspace::Space,
-            "complex" => Workspace::Complex,
-            "spectrum" => Workspace::Spectrum,
-            _ => Workspace::Calculus,
-        };
+        self.workspace = Workspace::from_name(&s.workspace).unwrap_or(Workspace::Calculus);
+        // Saved order first, then any workspace the save did not know.
+        let mut tabs: Vec<Workspace> = Vec::new();
+        for w in s.tabs.iter().filter_map(|n| Workspace::from_name(n)).chain(Workspace::ALL) {
+            if !tabs.contains(&w) {
+                tabs.push(w);
+            }
+        }
+        self.tabs = tabs;
         if let Some(c) = s.plane {
             self.plane.restore(c);
         }
@@ -199,17 +264,7 @@ impl MathCrystal {
                     }
                     ui.label(RichText::new("Math-crystal").size(17.0).strong().color(t.text));
                     ui.add_space(14.0);
-                    segmented(
-                        ui,
-                        &mut self.workspace,
-                        &[
-                            (Workspace::Plane, &with_icon(icon::CURVE, tr("Plane", "平面曲线")), tr("Curves in the plane: y = f(x), implicit, polar, parametric, regions", "平面曲线：函数、隐函数、极坐标、参数方程与区域")),
-                            (Workspace::Calculus, &with_icon(icon::FUNCTION, tr("Calculus", "多元微积分")), tr("Functions of two variables", "二元函数")),
-                            (Workspace::Space, &with_icon(icon::CUBE, tr("Space", "空间几何")), tr("Surfaces, lines and solids in space", "空间中的曲面、直线与立体")),
-                            (Workspace::Complex, &with_icon(icon::TARGET, tr("Complex", "复变函数")), tr("Complex functions w = f(z)", "复变函数 w = f(z)")),
-                            (Workspace::Spectrum, &with_icon(icon::SINE, tr("Spectrum", "频谱")), tr("Fourier transform of an absolutely integrable f(t)", "绝对可积信号 f(t) 的傅里叶变换")),
-                        ],
-                    );
+                    crate::ui::widgets::tab_bar(ui, &mut self.workspace, &mut self.tabs, &Workspace::ALL, Workspace::tab);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let dark = t.dark;
                         let label = if dark { with_icon(icon::SUN, tr("Light", "浅色")) } else { with_icon(icon::MOON, tr("Dark", "深色")) };
@@ -257,6 +312,7 @@ impl MathCrystal {
                     row(ui, tr("Double-click", "双击"), tr("Reset the view", "重置视角"));
                     row(ui, tr("Shift + click", "Shift + 单击"), tr("Move P to the surface point under the cursor", "把 P 移到光标下的曲面点"));
                     row(ui, "Ctrl + / Ctrl -", tr("Scale the whole interface", "缩放整个界面"));
+                    row(ui, "Ctrl + Q", tr("Quit (everything is remembered)", "退出（所有内容都会记住）"));
                 });
                 ui.add_space(8.0);
                 ui.label(RichText::new(tr("Expression syntax", "表达式语法")).strong());
@@ -335,6 +391,7 @@ impl eframe::App for MathCrystal {
         let dark = self.calc.settings_mut().theme == Theme::Dark;
         storage.set_string("theme", (if dark { "dark" } else { "light" }).into());
         eframe::set_value(storage, crate::session::KEY, &self.session());
+        self.save_views(storage);
     }
 
     /// Save only when the window closes (eframe always does that); no
@@ -345,6 +402,10 @@ impl eframe::App for MathCrystal {
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         crate::FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Ctrl+Q closes the window the normal way, so the session is saved.
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if ui.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_help = !self.show_help;
         }
@@ -364,6 +425,20 @@ impl eframe::App for MathCrystal {
     }
 }
 
+
+/// Saved view of the Calculus workspace (the model curvatures re-sync to
+/// the true second derivatives at P on start).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CalcView {
+    settings: Settings,
+    mode: CanvasMode,
+    #[serde(default)]
+    map_visited: bool,
+    #[serde(default)]
+    camera: crate::session::CameraState,
+    #[serde(default)]
+    pick_mode: bool,
+}
 
 pub struct CalcWorkspace {
     src: String,
@@ -485,6 +560,34 @@ impl CalcWorkspace {
             use_region: self.use_region,
             params: self.params.state(),
         }
+    }
+
+    /// How the surface is being looked at: layers, camera, map or surface.
+    pub fn view_state(&self) -> CalcView {
+        CalcView { settings: self.settings.clone(), mode: self.mode, map_visited: self.map_visited, camera: self.view.state(), pick_mode: self.pick_mode }
+    }
+
+    /// Put back a saved view (ranges and P stay as [`Self::restore`] set
+    /// them).
+    pub fn restore_view(&mut self, v: CalcView) {
+        let theme = self.settings.theme;
+        let mut st = v.settings;
+        let ok = |x: f64| x.is_finite();
+        if ![st.model_fxx, st.model_fyy, st.model_fxy, st.dir_angle, st.slice_t].into_iter().all(ok) {
+            return;
+        }
+        st.resolution = st.resolution.clamp(33, 401);
+        st.riemann_n = st.riemann_n.clamp(2, 60);
+        st.slice_t = st.slice_t.clamp(0.0, 1.0);
+        st.theme = theme;
+        // Ranges and P come from the session itself.
+        let old = &self.settings;
+        (st.xr, st.yr, st.zr, st.a, st.b) = (old.xr, old.yr, old.zr, old.a, old.b);
+        self.settings = st;
+        self.mode = v.mode;
+        self.map_visited = v.map_visited;
+        self.pick_mode = v.pick_mode;
+        self.view.restore(&v.camera);
     }
 
     pub fn restore(&mut self, s: crate::session::CalcState) {
@@ -1326,45 +1429,9 @@ impl CalcWorkspace {
 
     fn overlays(&mut self, ui: &mut Ui, rect: Rect, t: &Tokens) {
         let inner = rect.shrink(12.0);
-        // Top-left: values at P.
-        let mut tl = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
-        if let Some(d) = self.derivs.as_ref().filter(|_| self.settings.show_point) {
-            overlay_frame(t).show(&mut tl, |ui| {
-                let s = &self.settings;
-                ui.label(RichText::new(format!("P = ({}, {})", fmt_short(s.a), fmt_short(s.b))).strong().color(t.text));
-                if d.f.is_finite() {
-                    egui::Grid::new("p_vals").num_columns(3).spacing([6.0, 3.0]).show(ui, |ui| {
-                        let row = |ui: &mut Ui, sw: Option<u32>, name: &str, v: f64| {
-                            match sw {
-                                Some(c) => {
-                                    let (r, _) = ui.allocate_exact_size(EVec2::new(8.0, 8.0), Sense::hover());
-                                    ui.painter().circle_filled(r.center(), 4.0, hex32(c));
-                                }
-                                None => {
-                                    ui.label("");
-                                }
-                            }
-                            ui.label(RichText::new(name).color(t.muted));
-                            ui.label(RichText::new(fmt_val(v)).monospace().color(t.text));
-                            ui.end_row();
-                        };
-                        row(ui, None, "f(P)", d.f);
-                        if d.fx.ok() {
-                            row(ui, Some(calc_view::C_TAN_X), "∂f/∂x", d.fx.v);
-                        }
-                        if d.fy.ok() {
-                            row(ui, Some(calc_view::C_TAN_Y), "∂f/∂y", d.fy.v);
-                        }
-                    });
-                } else {
-                    ui.label(RichText::new(tr("f is undefined here", "f 在此处无定义")).color(t.error));
-                }
-            });
-        }
-
         // Top-right: view presets, projection, export.
         let mut top_right = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::right_to_left(Align::Min)));
-        overlay_frame(t).inner_margin(egui::Margin::same(5)).show(&mut top_right, |ui| {
+        let toolbar = overlay_frame(t).inner_margin(egui::Margin::same(5)).show(&mut top_right, |ui| {
             // The parent lays out right-to-left, so add items right-most first.
             ui.horizontal(|ui| {
                 if ui.button(with_icon(icon::CAMERA, "")).on_hover_text(crate::ui::export::hint(tr("Save the view as PNG in", "把视图保存为 PNG，位置："))).clicked() {
@@ -1395,7 +1462,47 @@ impl CalcWorkspace {
                     self.mode = m;
                 }
             });
-        });
+        }).response.rect;
+
+        // Top-left: values at P.
+        // (Below the toolbar when that is long enough to reach it.)
+        if let Some(d) = self.derivs.as_ref().filter(|_| self.settings.show_point) {
+            let width_id = ui.scope_id().with("p_panel_w");
+            let room = crate::ui::widgets::top_left_room(ui, inner, toolbar, width_id);
+            let mut tl = ui.new_child(UiBuilder::new().max_rect(room).layout(Layout::top_down(Align::Min)));
+            let shown = overlay_frame(t).show(&mut tl, |ui| {
+                let s = &self.settings;
+                ui.label(RichText::new(format!("P = ({}, {})", fmt_short(s.a), fmt_short(s.b))).strong().color(t.text));
+                if d.f.is_finite() {
+                    egui::Grid::new("p_vals").num_columns(3).spacing([6.0, 3.0]).show(ui, |ui| {
+                        let row = |ui: &mut Ui, sw: Option<u32>, name: &str, v: f64| {
+                            match sw {
+                                Some(c) => {
+                                    let (r, _) = ui.allocate_exact_size(EVec2::new(8.0, 8.0), Sense::hover());
+                                    ui.painter().circle_filled(r.center(), 4.0, hex32(c));
+                                }
+                                None => {
+                                    ui.label("");
+                                }
+                            }
+                            ui.label(RichText::new(name).color(t.muted));
+                            ui.label(RichText::new(fmt_val(v)).monospace().color(t.text));
+                            ui.end_row();
+                        };
+                        row(ui, None, "f(P)", d.f);
+                        if d.fx.ok() {
+                            row(ui, Some(calc_view::C_TAN_X), "∂f/∂x", d.fx.v);
+                        }
+                        if d.fy.ok() {
+                            row(ui, Some(calc_view::C_TAN_Y), "∂f/∂y", d.fy.v);
+                        }
+                    });
+                } else {
+                    ui.label(RichText::new(tr("f is undefined here", "f 在此处无定义")).color(t.error));
+                }
+            });
+            crate::ui::widgets::remember_overlay(ui, width_id, shown.response.rect);
+        }
 
         // Bottom: layer chips. Folded into one "Layers" button by default;
         // unfolded they sit in one centred row and shorten their labels when

@@ -9,7 +9,7 @@ use crate::render::scene::{
     tick_label, ticks,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Coloring {
     Height,
     Solid,
@@ -21,8 +21,10 @@ pub enum Theme {
     Dark,
 }
 
-/// Everything that determines the scene (camera excluded).
-#[derive(Clone, PartialEq, Debug)]
+/// Everything that determines the scene (camera excluded). Saved with the
+/// session (the theme follows the app and is not).
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub a: f64,
     pub b: f64,
@@ -63,6 +65,7 @@ pub struct Settings {
     pub slice_t: f64,
     pub show_grid: bool,
     pub show_ticks: bool,
+    #[serde(skip)]
     pub theme: Theme,
 }
 

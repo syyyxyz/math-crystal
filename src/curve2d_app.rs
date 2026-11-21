@@ -164,7 +164,7 @@ fn from_screen(rect: Rect, f: &Frame2, p: Pos2) -> [f64; 2] {
     [f.x0 + (p.x - rect.left()) as f64 / f.kx, f.y1 - (p.y - rect.top()) as f64 / f.ky]
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 enum IntKind {
     /// ∫ f(x) dx.
     Signed,
@@ -384,6 +384,43 @@ struct IntegralState {
     show: bool,
     /// (key, main result, area / second result)
     result: Option<(String, Integral, Option<Integral>)>,
+}
+
+/// Saved view of the Plane workspace beyond the curves and the window:
+/// layers, the chosen point, the point Q and the integral. Curves are
+/// referred to by their position in the list.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct PlaneView {
+    show_grid: bool,
+    polar_grid: bool,
+    pi_ticks: bool,
+    show_asym: bool,
+    hover_tangent: bool,
+    show_marks: bool,
+    show_inter: bool,
+    show_labels: bool,
+    show_legend: bool,
+    /// Point Q with the tangents through it.
+    ext: Option<[f64; 2]>,
+    /// Chosen point: (curve, parameter, x, y).
+    pick: Option<(usize, f64, f64, f64)>,
+    show_tangent: bool,
+    show_normal: bool,
+    show_circle: bool,
+    /// Integral: curve, second curve, kind, a, b, shown.
+    int_curve: Option<usize>,
+    int_other: Option<usize>,
+    int_kind: IntKind,
+    int_a: f64,
+    int_b: f64,
+    int_show: bool,
+}
+
+impl Default for PlaneView {
+    fn default() -> Self {
+        PlaneWorkspace::new().view_state()
+    }
 }
 
 pub struct PlaneWorkspace {
@@ -659,6 +696,68 @@ impl PlaneWorkspace {
             equal: self.equal,
             params: self.params.state(),
         }
+    }
+
+    pub fn view_state(&self) -> PlaneView {
+        let idx = |uid: Option<u32>| uid.and_then(|u| self.index_of(u));
+        let it = &self.integral;
+        PlaneView {
+            show_grid: self.show_grid,
+            polar_grid: self.polar_grid,
+            pi_ticks: self.pi_ticks,
+            show_asym: self.show_asym,
+            hover_tangent: self.hover_tangent,
+            show_marks: self.show_marks,
+            show_inter: self.show_inter,
+            show_labels: self.show_labels,
+            show_legend: self.show_legend,
+            ext: self.ext,
+            pick: self.pick.and_then(|p| Some((self.index_of(p.uid)?, p.u, p.x, p.y))),
+            show_tangent: self.show_tangent,
+            show_normal: self.show_normal,
+            show_circle: self.show_circle,
+            int_curve: idx(it.curve),
+            int_other: idx(it.other),
+            int_kind: it.kind,
+            int_a: it.a,
+            int_b: it.b,
+            int_show: it.show,
+        }
+    }
+
+    /// Put back a saved view; call after [`Self::restore`] so that curve
+    /// positions refer to the restored curves.
+    pub fn restore_view(&mut self, v: PlaneView) {
+        self.show_grid = v.show_grid;
+        self.polar_grid = v.polar_grid && !v.show_grid;
+        self.pi_ticks = v.pi_ticks;
+        self.show_asym = v.show_asym;
+        self.hover_tangent = v.hover_tangent;
+        self.show_marks = v.show_marks;
+        self.show_inter = v.show_inter;
+        self.show_labels = v.show_labels;
+        self.show_legend = v.show_legend;
+        self.show_tangent = v.show_tangent;
+        self.show_normal = v.show_normal;
+        self.show_circle = v.show_circle;
+        let finite = |p: &[f64]| p.iter().all(|x| x.is_finite() && x.abs() < 1e12);
+        self.ext = v.ext.filter(|q| finite(q));
+        self.pick = v.pick.and_then(|(k, u, x, y)| {
+            let c = self.curves.get(k)?;
+            // A path point is found again from u, an implicit one from (x, y).
+            (u.is_finite() || finite(&[x, y])).then_some(Pick { uid: c.uid, u, x, y })
+        });
+        self.settle_pick();
+        let uid = |k: Option<usize>| k.and_then(|k| self.curves.get(k)).map(|c| c.uid);
+        let it = &mut self.integral;
+        it.curve = uid(v.int_curve);
+        it.other = uid(v.int_other);
+        it.kind = v.int_kind;
+        if finite(&[v.int_a, v.int_b]) {
+            (it.a, it.b) = (v.int_a, v.int_b);
+        }
+        it.show = v.int_show && it.curve.is_some();
+        it.result = None;
     }
 
     pub fn restore(&mut self, s: crate::session::PlaneState) {

@@ -151,6 +151,123 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     changed
 }
 
+/// What [`tab_bar`] did this frame.
+#[derive(Default, Clone, Copy)]
+pub struct TabChange {
+    /// Another tab was chosen.
+    pub selected: bool,
+    /// The tabs were reordered (dragged, or reset from the context menu).
+    pub reordered: bool,
+}
+
+/// Segmented tabs that can be dragged into another order. `order` holds
+/// the tabs as shown; `default_order` is offered on right-click.
+pub fn tab_bar<T: PartialEq + Copy + std::hash::Hash + std::fmt::Debug>(
+    ui: &mut Ui,
+    value: &mut T,
+    order: &mut Vec<T>,
+    default_order: &[T],
+    label: impl Fn(T) -> (String, &'static str),
+) -> TabChange {
+    let t = tokens(ui.ctx());
+    let font = FontId::proportional(13.0);
+    let mut out = TabChange::default();
+    let galleys: Vec<_> = order.iter().map(|&v| ui.painter().layout_no_wrap(label(v).0, font.clone(), t.text)).collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 20.0).collect();
+    let total = Vec2::new(widths.iter().sum::<f32>() + 4.0, 28.0);
+    let (rect, base) = ui.allocate_exact_size(total, Sense::hover());
+    let track = if t.dark { Color32::from_rgb(0x14, 0x16, 0x1d) } else { Color32::from_rgb(0xe6, 0xe9, 0xf0) };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), track);
+    // Slots in the current order.
+    let mut slots = Vec::with_capacity(order.len());
+    let mut x = rect.min.x + 2.0;
+    for w in &widths {
+        slots.push(egui::Rect::from_min_size(egui::pos2(x, rect.min.y + 2.0), Vec2::new(*w, 24.0)));
+        x += w;
+    }
+    let grab_id = base.id.with("tab_grab");
+    let pointer = ui.input(|i| i.pointer.interact_pos());
+    // Dragged tab: index, where it is drawn, centre for ordering.
+    let mut dragged: Option<(usize, egui::Rect, f32)> = None;
+    for (i, &v) in order.iter().enumerate() {
+        let id = base.id.with(("tab", v));
+        let resp = ui.interact(slots[i], id, Sense::click_and_drag());
+        // Where in the tab it was grabbed: the press, not where the drag
+        // was recognised (that can be far off after a quick move).
+        if resp.drag_started()
+            && let Some(p) = ui.input(|i| i.pointer.press_origin())
+        {
+            ui.ctx().data_mut(|d| d.insert_temp(grab_id, p.x - slots[i].min.x));
+        }
+        if resp.dragged()
+            && let Some(p) = pointer
+        {
+            let grab = ui.ctx().data(|d| d.get_temp::<f32>(grab_id)).unwrap_or(slots[i].width() / 2.0);
+            // Drawn inside the bar; ordered by where the pointer really is,
+            // so dragging past either end reaches the first or last slot.
+            let free = p.x - grab;
+            let left = free.clamp(rect.min.x + 2.0, rect.max.x - 2.0 - slots[i].width());
+            dragged = Some((i, slots[i].translate(Vec2::new(left - slots[i].min.x, 0.0)), free + slots[i].width() / 2.0));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else {
+            let tip = label(v).1;
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
+            if resp.clicked() && *value != v {
+                *value = v;
+                out.selected = true;
+            }
+            resp.context_menu(|ui| {
+                let reset = ui.add_enabled(order.as_slice() != default_order, egui::Button::new(crate::i18n::tr("Reset tab order", "恢复默认顺序")));
+                if reset.clicked() {
+                    out.reordered = true;
+                    ui.close();
+                }
+            });
+        }
+    }
+    if out.reordered {
+        *order = default_order.to_vec();
+        return out;
+    }
+    let draw = |ui: &Ui, r: egui::Rect, k: usize, lifted: bool| {
+        let v = order[k];
+        let selected = *value == v;
+        let hovered = ui.rect_contains_pointer(r);
+        if lifted {
+            ui.painter().rect(r, CornerRadius::same(6), t.card, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+        } else if selected {
+            ui.painter().rect(r, CornerRadius::same(6), t.card, Stroke::new(1.0, t.card_border), egui::StrokeKind::Inside);
+        } else if hovered {
+            ui.painter().rect_filled(r, CornerRadius::same(6), t.card.gamma_multiply(0.5));
+        }
+        let fg = if selected { t.accent_text } else { t.muted };
+        ui.painter().galley(r.center() - galleys[k].size() / 2.0, galleys[k].clone(), fg);
+    };
+    for (k, slot) in slots.iter().enumerate() {
+        if dragged.is_none_or(|(d, _, _)| d != k) {
+            draw(ui, *slot, k, false);
+        }
+    }
+    if let Some((k, r, c)) = dragged {
+        // A gap where the tab came from, the tab itself floating on top.
+        ui.painter().rect_filled(slots[k].shrink(1.0), CornerRadius::same(6), track.gamma_multiply(0.6));
+        draw(ui, r, k, true);
+        // Move it to the slot whose neighbours' centres it lies between
+        // (any distance in one frame: a quick drag still lands right).
+        let j = (0..order.len()).filter(|&m| m != k && slots[m].center().x < c).count();
+        if j != k {
+            let v = order.remove(k);
+            order.insert(j, v);
+            out.reordered = true;
+        }
+        if out.reordered {
+            ui.ctx().request_repaint();
+        }
+    }
+    out
+}
+
 /// Small rounded status badge.
 pub fn badge(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let font = FontId::proportional(12.0);
@@ -170,6 +287,23 @@ pub fn overlay_frame(t: &Tokens) -> Frame {
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(10, 7))
         .shadow(egui::Shadow { offset: [0, 3], blur: 12, spread: 0, color: Color32::from_black_alpha(if t.dark { 90 } else { 22 }) })
+}
+
+/// Room for a top-left canvas overlay next to the top-right `toolbar`: the
+/// whole canvas, or below the toolbar when the two would overlap. The
+/// overlay's width is remembered from the previous frame under `id`; pass
+/// what was shown to [`remember_overlay`].
+pub fn top_left_room(ui: &Ui, inner: egui::Rect, toolbar: egui::Rect, id: egui::Id) -> egui::Rect {
+    let width = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(260.0);
+    let mut room = inner;
+    if toolbar.left() < inner.left() + width + 8.0 {
+        room.min.y = toolbar.bottom() + 8.0;
+    }
+    room
+}
+
+pub fn remember_overlay(ui: &Ui, id: egui::Id, shown: egui::Rect) {
+    ui.ctx().data_mut(|d| d.insert_temp(id, shown.width()));
 }
 
 /// Muted caption text.
