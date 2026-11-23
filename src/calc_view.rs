@@ -3,7 +3,7 @@
 
 use glam::{DVec3, Vec2, Vec3};
 
-use crate::calc::{PointDerivs, Quadratic, Surface};
+use crate::calc::{PointDerivs, TangentPlane, Surface};
 use crate::render::scene::{
     Camera, Frame3, GridStyle, LineInstance, MeshData, Projector, Scene, hex, height_mesh, line, polyline, sphere,
     tick_label, ticks,
@@ -36,12 +36,6 @@ pub struct Settings {
     pub show_surface: bool,
     pub surface_coloring: Coloring,
     pub wireframe: bool,
-    pub show_model: bool,
-    pub model_coloring: Coloring,
-    /// Curvatures used by the model (user-adjustable).
-    pub model_fxx: f64,
-    pub model_fyy: f64,
-    pub model_fxy: f64,
     pub show_point: bool,
     pub show_tangent_x: bool,
     pub show_tangent_y: bool,
@@ -82,11 +76,6 @@ impl Default for Settings {
             show_surface: true,
             surface_coloring: Coloring::Height,
             wireframe: true,
-            show_model: false,
-            model_coloring: Coloring::Solid,
-            model_fxx: 0.0,
-            model_fyy: 0.0,
-            model_fxy: 0.0,
             show_point: false,
             show_tangent_x: false,
             show_tangent_y: false,
@@ -144,7 +133,6 @@ impl Theme {
 }
 
 // Series colours (sRGB hex), shared with the UI legend.
-pub const C_MODEL: u32 = 0xf28e2b;
 pub const C_PLANE: u32 = 0x1f77e8;
 pub const C_TAN_X: u32 = 0x0aa1dd;
 pub const C_TAN_Y: u32 = 0xd6337f;
@@ -398,16 +386,7 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
     let d = surf.derivs(s.a, s.b);
     let width = 3.0;
     if d.first_ok() {
-        let q = Quadratic {
-            a: s.a,
-            b: s.b,
-            f: d.f,
-            fx: d.fx.v,
-            fy: d.fy.v,
-            fxx: s.model_fxx,
-            fyy: s.model_fyy,
-            fxy: s.model_fxy,
-        };
+        let q = TangentPlane { a: s.a, b: s.b, f: d.f, fx: d.fx.v, fy: d.fy.v };
         let grid_of = |m: usize, g: &dyn Fn(f64, f64) -> f64| {
             let mut out = Vec::with_capacity(m * m);
             for j in 0..m {
@@ -419,24 +398,6 @@ pub fn build(surface: Option<&Surface>, s: &Settings) -> Built {
             }
             out
         };
-        if s.show_model {
-            let m = 65;
-            let zm = grid_of(m, &|x, y| q.eval(x, y));
-            let style = GridStyle {
-                height_colors: s.model_coloring == Coloring::Height,
-                color: hex(C_MODEL, 0.62),
-                wire_lines: 16.0,
-                wire_strength: 0.25,
-                translucent: true,
-            };
-            let mut mesh = height_mesh(&zm, m, s.xr, s.yr, &frame, &style, None);
-            if s.model_coloring == Coloring::Height {
-                for v in &mut mesh.vertices {
-                    v.color[3] = 0.62;
-                }
-            }
-            scene.meshes.push(mesh);
-        }
         if s.show_plane {
             let m = 17;
             let zp = grid_of(m, &|x, y| q.linear(x, y));

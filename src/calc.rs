@@ -324,30 +324,17 @@ fn pick(symbolic: f64, numeric: f64) -> Value {
     }
 }
 
-/// Quadratic Taylor model around (a, b).
+/// Tangent plane of the graph at (a, b).
 #[derive(Clone, Copy, Debug)]
-pub struct Quadratic {
+pub struct TangentPlane {
     pub a: f64,
     pub b: f64,
     pub f: f64,
     pub fx: f64,
     pub fy: f64,
-    pub fxx: f64,
-    pub fyy: f64,
-    pub fxy: f64,
 }
 
-impl Quadratic {
-    pub fn eval(&self, x: f64, y: f64) -> f64 {
-        let (dx, dy) = (x - self.a, y - self.b);
-        self.f
-            + self.fx * dx
-            + self.fy * dy
-            + 0.5 * self.fxx * dx * dx
-            + self.fxy * dx * dy
-            + 0.5 * self.fyy * dy * dy
-    }
-
+impl TangentPlane {
     pub fn linear(&self, x: f64, y: f64) -> f64 {
         self.f + self.fx * (x - self.a) + self.fy * (y - self.b)
     }

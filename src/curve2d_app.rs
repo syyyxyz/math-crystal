@@ -300,6 +300,7 @@ impl CurveItem {
         let (def, w) = (self.def.as_ref()?, self.cache.window?);
         let marks = self.marks;
         if marks == 0 {
+            self.cache.feats = None;
             return None;
         }
         if self.cache.feats.as_ref().is_none_or(|f| f.0 != marks) {
@@ -452,6 +453,8 @@ pub struct PlaneWorkspace {
     show_normal: bool,
     show_circle: bool,
     dragging_pick: bool,
+    /// Which integration bound is being dragged: 0 = a, 1 = b.
+    dragging_bound: Option<usize>,
     integral: IntegralState,
     /// Intersections: (key, list of (curve a, curve b, point)).
     inter: (String, Vec<(usize, usize, [f64; 2])>),
@@ -673,6 +676,7 @@ impl PlaneWorkspace {
             show_normal: false,
             show_circle: true,
             dragging_pick: false,
+            dragging_bound: None,
             integral: IntegralState { curve: None, other: None, kind: IntKind::Signed, a: 0.0, b: 1.0, show: false, result: None },
             inter: (String::new(), Vec::new()),
             last_rect: Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0)),
@@ -1356,6 +1360,9 @@ impl PlaneWorkspace {
                         from_inter = true;
                     }
                 });
+                if st.show {
+                    caption(ui, tr("Drag a or b in the view to move a bound (Alt: no snapping).", "可在视图中直接拖动端点 a、b（按住 Alt 不吸附）。"));
+                }
                 match &st.result {
                     Some((_, main, second)) => {
                         let formula = kinds.iter().find(|x| x.0 == st.kind).map_or("", |x| x.2);
@@ -1596,7 +1603,9 @@ impl PlaneWorkspace {
                 (Some(s), Some(q)) => to_screen(rect, &fr0, q[0], q[1]).distance(s) < 12.0,
                 _ => false,
             };
+            self.dragging_bound = if self.dragging_ext { None } else { start.and_then(|s| self.bound_at(rect, &fr0, s)) };
             self.dragging_pick = !self.dragging_ext
+                && self.dragging_bound.is_none()
                 && match (start, self.pick_info()) {
                     (Some(s), Some(info)) => to_screen(rect, &fr0, info.p[0], info.p[1]).distance(s) < 12.0,
                     _ => false,
@@ -1605,11 +1614,17 @@ impl PlaneWorkspace {
         if resp.drag_stopped() {
             self.dragging_pick = false;
             self.dragging_ext = false;
+            self.dragging_bound = None;
         }
         if resp.dragged() {
             if self.dragging_ext && resp.dragged_by(egui::PointerButton::Primary) {
                 if let Some(at) = resp.interact_pointer_pos() {
                     self.ext = Some(from_screen(rect, &fr0, at));
+                }
+            } else if self.dragging_bound.is_some() && resp.dragged_by(egui::PointerButton::Primary) {
+                if let Some(at) = resp.interact_pointer_pos() {
+                    let alt = ui.input(|i| i.modifiers.alt);
+                    self.drag_bound(rect, &fr0, at, !alt);
                 }
             } else if self.dragging_pick && resp.dragged_by(egui::PointerButton::Primary) {
                 if let (Some(at), Some(pick)) = (resp.interact_pointer_pos(), self.pick)
@@ -1763,7 +1778,11 @@ impl PlaneWorkspace {
         }
         self.draw_pick(&p, rect, &fr, t);
         self.draw_ext(&p, rect, &fr, t, bg);
-        let hover = resp.hover_pos().filter(|_| !resp.dragged());
+        if self.dragging_bound.is_some() || resp.hover_pos().is_some_and(|h| !resp.dragged() && self.bound_at(rect, &fr, h).is_some()) {
+            let horizontal = self.integral.curve.and_then(|u| self.index_of(u)).and_then(|k| self.curves[k].form()) != Some(Form::FnY);
+            ui.ctx().set_cursor_icon(if horizontal { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
+        }
+        let hover = resp.hover_pos().filter(|_| !resp.dragged() && self.bound_at(rect, &fr, resp.hover_pos().unwrap()).is_none());
         let tip = self.draw_markers(&p, rect, &fr, t, bg, hover);
         // Hover: the nearest curve point, else nothing.
         if let Some(h) = hover {
@@ -1843,7 +1862,7 @@ impl PlaneWorkspace {
     fn marker_at(&self, rect: Rect, fr: &Frame2, at: Pos2) -> Option<(u32, [f64; 2], f64)> {
         if self.show_marks {
             for c in &self.curves {
-                let Some((_, fe)) = c.cache.feats.as_ref().filter(|_| c.visible) else { continue };
+                let Some((_, fe)) = c.cache.feats.as_ref().filter(|f| c.visible && f.0 == c.marks) else { continue };
                 for q in &fe.points {
                     if to_screen(rect, fr, q.x, q.y).distance(at) < 7.0 {
                         let u = if c.def.as_ref().is_some_and(|d| d.form == Form::FnX) { q.x } else if c.def.as_ref().is_some_and(|d| d.form == Form::FnY) { q.y } else { q.u };
@@ -2001,7 +2020,7 @@ impl PlaneWorkspace {
         let coord = |x: f64, y: f64| format!("({}, {})", nice::short(x), nice::short(y));
         if self.show_marks {
             for c in &self.curves {
-                let Some((_, fe)) = c.cache.feats.as_ref().filter(|_| c.visible) else { continue };
+                let Some((_, fe)) = c.cache.feats.as_ref().filter(|f| c.visible && f.0 == c.marks) else { continue };
                 let col = c32(COLORS[c.color]);
                 for q in &fe.points {
                     let s = to_screen(rect, f, q.x, q.y);
@@ -2137,6 +2156,104 @@ impl PlaneWorkspace {
         p.text(s + vec2(9.0, -9.0), Align2::LEFT_BOTTOM, "Q", FontId::proportional(14.0), ink);
     }
 
+    /// Screen handles of the integration bounds a and b: (bound, point on
+    /// the curve, other end of the edge for y = f(x) areas).
+    fn bound_handles(&self, rect: Rect, f: &Frame2) -> Vec<(usize, Pos2, Option<Pos2>)> {
+        let st = &self.integral;
+        if !st.show {
+            return vec![];
+        }
+        let Some(k) = st.curve.and_then(|u| self.index_of(u)) else { return vec![] };
+        let Some(d) = &self.curves[k].def else { return vec![] };
+        let us = [st.a, st.b];
+        let [x, y] = d.path(&us);
+        let bot = match st.kind {
+            IntKind::Signed => Some(vec![0.0; 2]),
+            IntKind::Between => st.other.and_then(|u| self.index_of(u)).and_then(|o| self.curves[o].def.as_ref()).map(|g| g.path(&us)[1].clone()),
+            _ => None,
+        };
+        (0..2)
+            .filter(|&i| x[i].is_finite() && y[i].is_finite())
+            .map(|i| (i, to_screen(rect, f, x[i], y[i]), bot.as_ref().filter(|b| b[i].is_finite()).map(|b| to_screen(rect, f, x[i], b[i]))))
+            .collect()
+    }
+
+    /// The bound whose handle (or edge) is under `at`.
+    fn bound_at(&self, rect: Rect, f: &Frame2, at: Pos2) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, top, bot) in self.bound_handles(rect, f) {
+            let mut d = top.distance(at);
+            if let Some(b) = bot {
+                let (lo, hi) = (top.y.min(b.y), top.y.max(b.y));
+                if at.y >= lo && at.y <= hi {
+                    d = d.min((at.x - top.x).abs());
+                }
+                d = d.min(b.distance(at));
+            }
+            if d < 9.0 && best.is_none_or(|x| d < x.1) {
+                best = Some((i, d));
+            }
+        }
+        best.map(|b| b.0)
+    }
+
+    /// Move the dragged bound to the pointer; `snap` pulls it onto special
+    /// points and intersections a few points away.
+    fn drag_bound(&mut self, rect: Rect, f: &Frame2, at: Pos2, snap: bool) {
+        let Some(i) = self.dragging_bound else { return };
+        let Some(k) = self.integral.curve.and_then(|u| self.index_of(u)) else { return };
+        let c = &self.curves[k];
+        let Some(form) = c.form() else { return };
+        let q = from_screen(rect, f, at);
+        let mut u = match form {
+            Form::FnX => q[0],
+            Form::FnY => q[1],
+            _ => match self.nearest(rect, f, at, Some(c.uid)) {
+                Some((_, _, u, _)) if u.is_finite() => u,
+                _ => return,
+            },
+        };
+        if snap {
+            // Candidates as (screen point, parameter).
+            let mut cands: Vec<(Pos2, f64)> = Vec::new();
+            if let Some((m, fe)) = &c.cache.feats
+                && *m == c.marks
+                && self.show_marks
+            {
+                for p in &fe.points {
+                    let pu = match form {
+                        Form::FnX => p.x,
+                        Form::FnY => p.y,
+                        _ => p.u,
+                    };
+                    cands.push((to_screen(rect, f, p.x, p.y), pu));
+                }
+            }
+            if self.show_inter && matches!(form, Form::FnX | Form::FnY) {
+                for (a, b, p) in &self.inter.1 {
+                    if *a == k || *b == k {
+                        cands.push((to_screen(rect, f, p[0], p[1]), if form == Form::FnX { p[0] } else { p[1] }));
+                    }
+                }
+            }
+            let dist = |s: Pos2| match form {
+                Form::FnX => (s.x - at.x).abs(),
+                Form::FnY => (s.y - at.y).abs(),
+                _ => s.distance(at),
+            };
+            if let Some(best) = cands.iter().filter(|c| c.1.is_finite() && dist(c.0) < 8.0).min_by(|a, b| dist(a.0).total_cmp(&dist(b.0))) {
+                u = best.1;
+            }
+        }
+        let st = &mut self.integral;
+        if i == 0 { st.a = u } else { st.b = u }
+        // Crossing the other bound swaps them, so a ≤ b stays.
+        if st.a > st.b {
+            (st.a, st.b) = (st.b, st.a);
+            self.dragging_bound = Some(1 - i);
+        }
+    }
+
     fn draw_integral(&self, p: &egui::Painter, rect: Rect, f: &Frame2, _t: &Tokens) {
         let st = &self.integral;
         if !st.show {
@@ -2225,6 +2342,21 @@ impl PlaneWorkspace {
         }
         if !mesh.is_empty() {
             p.add(mesh);
+        }
+        // Handles to drag a and b.
+        let bg = if _t.dark { Color32::from_gray(20) } else { Color32::WHITE };
+        for (i, top, bot) in self.bound_handles(rect, f) {
+            let active = self.dragging_bound == Some(i);
+            let r = if active { 5.5 } else { 4.5 };
+            for q in std::iter::once(top).chain(bot) {
+                if rect.expand(6.0).contains(q) {
+                    p.circle(q, r, bg, Stroke::new(2.0, col));
+                }
+            }
+            let at = bot.map_or(top, |b| if b.y > top.y { b } else { top });
+            if rect.contains(at) {
+                p.text(at + vec2(0.0, 8.0), egui::Align2::CENTER_TOP, if i == 0 { "a" } else { "b" }, egui::FontId::proportional(12.0), col);
+            }
         }
     }
 
@@ -2490,8 +2622,9 @@ fn curve_card(ui: &mut Ui, t: &Tokens, k: usize, c: &mut CurveItem, default_open
                 region_area(ui, t, c, vis);
             }
             // The points found, to read their values.
-            if let Some((_, fe)) = &c.cache.feats
+            if let Some((m, fe)) = &c.cache.feats
                 && c.marks != 0
+                && *m == c.marks
             {
                 let in_view: Vec<_> = fe.points.iter().filter(|q| q.x >= vis.x0 && q.x <= vis.x1 && q.y >= vis.y0 && q.y <= vis.y1).collect();
                 for q in in_view.iter().take(10) {

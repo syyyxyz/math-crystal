@@ -426,8 +426,7 @@ impl eframe::App for MathCrystal {
 }
 
 
-/// Saved view of the Calculus workspace (the model curvatures re-sync to
-/// the true second derivatives at P on start).
+/// Saved view of the Calculus workspace.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CalcView {
     settings: Settings,
@@ -456,8 +455,6 @@ pub struct CalcWorkspace {
     z_samples: Vec<f64>,
     scene_version: u64,
     build_ms: f64,
-    /// (src, a, b) the model sliders were last synced to.
-    model_synced_for: Option<(String, f64, f64)>,
     toast: Option<(String, Instant)>,
     export: Export,
     mode: CanvasMode,
@@ -504,7 +501,6 @@ impl CalcWorkspace {
             z_samples: vec![],
             scene_version: 0,
             build_ms: 0.0,
-            model_synced_for: None,
             toast: None,
             export: Export::default(),
             mode: CanvasMode::Surface,
@@ -573,7 +569,7 @@ impl CalcWorkspace {
         let theme = self.settings.theme;
         let mut st = v.settings;
         let ok = |x: f64| x.is_finite();
-        if ![st.model_fxx, st.model_fyy, st.model_fxy, st.dir_angle, st.slice_t].into_iter().all(ok) {
+        if ![st.dir_angle, st.slice_t].into_iter().all(ok) {
             return;
         }
         st.resolution = st.resolution.clamp(33, 401);
@@ -665,28 +661,9 @@ impl CalcWorkspace {
         self.crit_key = None;
         self.int_key = None;
         self.built_for = None;
-        self.model_synced_for = None;
         if settled {
             self.update_auto_z();
         }
-    }
-
-    /// Re-sync the model curvatures to the true second derivatives when the
-    /// function or the point changes.
-    fn sync_model(&mut self, force: bool) {
-        let Some(surf) = &self.surface else { return };
-        let key = (surf.source.clone(), self.settings.a, self.settings.b);
-        if !force && self.model_synced_for.as_ref() == Some(&key) {
-            return;
-        }
-        let d = surf.derivs(self.settings.a, self.settings.b);
-        let s = &mut self.settings;
-        let pick = |v: f64| if v.is_finite() { v } else { 0.0 };
-        s.model_fxx = pick(d.fxx.v);
-        s.model_fyy = pick(d.fyy.v);
-        // The model has one cross term; use the mean of both orders.
-        s.model_fxy = pick(if d.fxy.ok() && d.fyx.ok() { 0.5 * (d.fxy.v + d.fyx.v) } else { d.fxy.v });
-        self.model_synced_for = Some(key);
     }
 
     /// Recompute critical points and the double integral when their inputs
@@ -789,7 +766,6 @@ impl CalcWorkspace {
         // Derived state must be current before the canvas draws. The sidebar
         // was drawn from the previous build, so repaint once more if it moved.
         let version = self.scene_version;
-        self.sync_model(false);
         self.rebuild_if_needed();
         if self.scene_version != version {
             ui.ctx().request_repaint();
@@ -1150,42 +1126,6 @@ impl CalcWorkspace {
         );
         self.use_region = use_region;
 
-        // ---- Taylor model ---------------------------------------------
-        let mut reset = false;
-        let s = &mut self.settings;
-        card(
-            ui,
-            "model",
-            icon::CURVE,
-            tr("Quadratic model", "二阶泰勒模型"),
-            false,
-            |ui| {
-                if eye(ui, &mut s.show_model, tr("Show the Taylor model surface", "显示泰勒模型曲面")) && s.show_model {
-                    s.show_point = true;
-                }
-            },
-            |ui| {
-                caption(ui, tr("Second-order Taylor model at P. Drag the curvatures to explore.", "P 点处的二阶泰勒近似。拖动曲率系数可以观察变化。"));
-                egui::Grid::new("model").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    for (name, v) in [("∂²f/∂x²", &mut s.model_fxx), ("∂²f/∂y²", &mut s.model_fyy), ("∂²f/∂x∂y", &mut s.model_fxy)] {
-                        ui.label(RichText::new(name).color(t.muted));
-                        let lim = (v.abs() * 1.5).max(8.0);
-                        ui.add(egui::Slider::new(v, -lim..=lim).max_decimals(3).clamping(egui::SliderClamping::Never));
-                        ui.end_row();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button(with_icon(icon::RESTORE, tr("Reset to f", "重置为 f 的值"))).clicked() {
-                        reset = true;
-                    }
-                    segmented(ui, &mut s.model_coloring, &[(Coloring::Solid, tr("Solid", "单色"), ""), (Coloring::Height, tr("Height", "高度"), "")]);
-                });
-            },
-        );
-        if reset {
-            self.sync_model(true);
-        }
-
         // ---- Appearance ----------------------------------------------
         let s = &mut self.settings;
         card(
@@ -1306,7 +1246,6 @@ impl CalcWorkspace {
             && let Some(pos) = resp.interact_pointer_pos()
         {
             self.pick_point(&proj, Vec2::new(pos.x - rect.min.x, pos.y - rect.min.y));
-            self.sync_model(false);
             self.rebuild_if_needed();
         }
 
@@ -1419,7 +1358,6 @@ impl CalcWorkspace {
             let (xr, yr) = (self.settings.xr, self.settings.yr);
             self.settings.a = round_to(x, xr);
             self.settings.b = round_to(y, yr);
-            self.sync_model(false);
             self.rebuild_if_needed();
             ui.ctx().request_repaint();
         }
@@ -1516,7 +1454,6 @@ impl CalcWorkspace {
             chips.push((&mut s.show_tangent_x, tr("Tangent x", "x 切线"), tr("Tan x", "x 切线"), Some(calc_view::C_TAN_X), tr("Tangent line in the x direction", "沿 x 方向的切线")));
             chips.push((&mut s.show_tangent_y, tr("Tangent y", "y 切线"), tr("Tan y", "y 切线"), Some(calc_view::C_TAN_Y), tr("Tangent line in the y direction", "沿 y 方向的切线")));
             chips.push((&mut s.show_plane, tr("Plane", "切平面"), tr("Plane", "切面"), Some(calc_view::C_PLANE), tr("Tangent plane at P", "P 点的切平面")));
-            chips.push((&mut s.show_model, tr("Taylor model", "泰勒模型"), tr("Model", "模型"), Some(calc_view::C_MODEL), tr("Second-order Taylor model at P", "P 点的二阶泰勒近似曲面")));
         }
         chips.push((&mut s.show_direction, tr("Direction u", "方向 u"), "u", Some(calc_view::C_DIR), tr("Directional derivative along u", "沿 u 的方向导数")));
         chips.push((&mut s.show_gradient, tr("∇f at P", "P 点 ∇f"), "∇f", Some(calc_view::C_GRAD), tr("Steepest-ascent direction at P", "P 点的最速上升方向")));

@@ -20,12 +20,10 @@ fn main() {
     let mut s = if std::env::var("DEFAULTS").is_ok() {
         calc_view::Settings::default()
     } else if std::env::var("ICON").is_ok() {
-        calc_view::Settings { show_model: false, show_point: false, resolution: 97, ..Default::default() }
+        calc_view::Settings { show_point: false, resolution: 97, ..Default::default() }
     } else {
         calc_view::Settings { a: 0.6, b: -0.4, show_plane: true, show_tangent_x: true, show_tangent_y: true, show_grid: true, show_sections: false, show_gradient: true, ..Default::default() }
     };
-    let d = surf.derivs(s.a, s.b);
-    s.model_fxx = d.fxx.v; s.model_fyy = d.fyy.v; s.model_fxy = d.fxy.v;
     let z = surf.sample(s.xr, s.yr, 65);
     if let Some(zr) = calc_view::auto_z(&z) { s.zr = zr; }
     let built = calc_view::build(Some(&surf), &s);

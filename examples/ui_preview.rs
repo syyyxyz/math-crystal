@@ -26,7 +26,6 @@ fn main() {
         s.show_tangent_y = true;
         s.show_sections = true;
         s.show_grid = true;
-        s.show_model = false;
     }
     let complex = std::env::args().any(|a| a == "--complex");
     if complex {
